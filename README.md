@@ -34,7 +34,7 @@ cd multica-mini
 
 ## 包含的功能
 
-- 登记智能体的命令、职责和 skill；
+- 登记、查看并编辑智能体的命令、职责和 skill；
 - 任务直接分配给智能体；
 - 创建包含 leader 和成员的小队；
 - leader 通过 mention 派发成员；

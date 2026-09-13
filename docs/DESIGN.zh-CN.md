@@ -86,7 +86,7 @@ flowchart LR
 
 然后访问 `http://127.0.0.1:30420`。页面支持：
 
-- 登记智能体和 skill；
+- 登记智能体和 skill，点击智能体卡片查看及编辑配置；
 - 创建小队、选择 leader、添加成员；
 - 创建、筛选和查看任务；
 - 启动智能体协作；
@@ -104,6 +104,8 @@ flowchart LR
 | GET | `/api/health` | 健康检查和版本 |
 | GET | `/api/state` | 获取全部本地状态 |
 | POST | `/api/agents` | 登记智能体 |
+| GET | `/api/agents/:id` | 获取单个智能体配置 |
+| PUT | `/api/agents/:id` | 编辑智能体名称、职责、命令和 skill |
 | POST | `/api/squads` | 创建小队 |
 | POST | `/api/squads/:id/members` | 添加小队成员 |
 | POST | `/api/issues` | 创建任务 |

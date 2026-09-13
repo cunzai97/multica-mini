@@ -821,6 +821,13 @@ int serve_web(const fs::path &home, const std::vector<std::string> &args) {
         });
     });
 
+    server.Get(R"(/api/agents/([A-Za-z0-9._-]+))",
+               [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            json_response(response, load_entity(home, "agents", request.matches[1].str()));
+        });
+    });
+
     server.Post("/api/agents", [home](const httplib::Request &request, httplib::Response &response) {
         api_guard(response, [&] {
             const json body = parse_request_json(request);
@@ -843,6 +850,29 @@ int serve_web(const fs::path &home, const std::vector<std::string> &args) {
             };
             save_entity(home, "agents", id, agent);
             json_response(response, agent, 201);
+        });
+    });
+
+    server.Put(R"(/api/agents/([A-Za-z0-9._-]+))",
+               [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            const std::string id = request.matches[1].str();
+            const json body = parse_request_json(request);
+            std::string name = optional_string(body, "name");
+            if (name.empty()) name = id;
+            const json command = string_array(body, "command");
+            if (command.empty() || !command[0].is_string() || trim(command[0].get<std::string>()).empty()) {
+                throw std::runtime_error("command must contain an executable");
+            }
+            std::lock_guard<std::mutex> lock(g_write_mutex);
+            json agent = load_entity(home, "agents", id);
+            agent["name"] = name;
+            agent["role"] = optional_string(body, "role");
+            agent["command"] = command;
+            agent["skills"] = string_array(body, "skills");
+            agent["updated_at"] = now_utc();
+            save_entity(home, "agents", id, agent);
+            json_response(response, agent);
         });
     });
 

@@ -32,6 +32,11 @@
     if (delta >= 0 && delta < 86400000) return Math.floor(delta / 3600000) + " 小时前";
     return two(date.getMonth() + 1) + "/" + two(date.getDate()) + " " + two(date.getHours()) + ":" + two(date.getMinutes());
   }
+  function formatFullTime(value) {
+    if (!value) return "—";
+    var date = new Date(value);
+    return isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+  }
   function truncate(value, size) {
     value = String(value || "").replace(/\s+/g, " ");
     return value.length > size ? value.slice(0, size - 1) + "..." : value;
@@ -157,11 +162,12 @@
         var parts = skill.split("/");
         return parts[parts.length - 1] === "SKILL.md" ? parts[parts.length - 2] : parts[parts.length - 1];
       });
-      return '<article class="node-card"><span class="node-index">AGENT ' + two(index + 1) + '</span>' +
+      return '<article class="node-card agent-card" data-agent="' + esc(agent.id) + '" tabindex="0" aria-label="查看并编辑智能体 ' + esc(agent.name || agent.id) + '"><span class="node-index">AGENT ' + two(index + 1) + '</span>' +
         '<h3>' + esc(agent.name || agent.id) + '</h3><span class="node-id">@' + esc(agent.id) + '</span>' +
         '<p class="node-role">' + esc(agent.role || "未设置职责") + '</p>' +
         '<div class="command-line">$ ' + esc((agent.command || []).join(" ")) + '</div>' +
-        '<div class="tag-row">' + (skills.length ? skills.map(function (skill) { return '<span class="tag">' + esc(skill) + '</span>'; }).join("") : '<span class="tag">未配置 skill</span>') + '</div></article>';
+        '<div class="tag-row">' + (skills.length ? skills.map(function (skill) { return '<span class="tag">' + esc(skill) + '</span>'; }).join("") : '<span class="tag">未配置 skill</span>') + '</div>' +
+        '<footer class="node-card-action"><span>' + esc(agent.updated_at ? "更新于 " + formatTime(agent.updated_at) : "创建于 " + formatTime(agent.created_at)) + '</span><b>查看与编辑&nbsp; →</b></footer></article>';
     }).join("");
   }
 
@@ -217,6 +223,27 @@
     var agents = state.agents.map(function (agent) { return '<option value="agent:' + esc(agent.id) + '">智能体 · ' + esc(agent.name || agent.id) + '</option>'; });
     var squads = state.squads.map(function (squad) { return '<option value="squad:' + esc(squad.id) + '">小队 · ' + esc(squad.name || squad.id) + '</option>'; });
     return agents.concat(squads).join("");
+  }
+
+  function openAgentEditor(id) {
+    var agent = byId("agents", id);
+    if (!agent) return toast("找不到这个智能体", true);
+    var command = agent.command || [];
+    var layer = addOverlay("modal-layer open");
+    layer.innerHTML = '<div class="modal agent-editor"><button class="modal-close" aria-label="关闭">×</button>' +
+      '<p class="eyebrow">AGENT PROFILE</p><div class="editor-heading"><div><h2>' + esc(agent.name || agent.id) + '</h2><p>创建于 ' + esc(formatFullTime(agent.created_at)) + '</p></div><span class="profile-avatar">' + esc(avatarText(agent.name || agent.id)) + '</span></div>' +
+      '<form id="edit-agent-form" class="form-grid" data-agent="' + esc(agent.id) + '">' +
+      '<div class="field"><label>ID</label><input name="id" value="' + esc(agent.id) + '" readonly><span class="field-note">ID 被任务和小队引用，创建后不可修改。</span></div>' +
+      '<div class="field"><label>显示名称</label><input name="name" value="' + esc(agent.name || "") + '" placeholder="RTL Reviewer"></div>' +
+      '<div class="field full"><label>职责</label><input name="role" value="' + esc(agent.role || "") + '" placeholder="说明这个智能体负责什么"></div>' +
+      '<div class="field full"><label>可执行文件 *</label><input name="exec" required value="' + esc(command[0] || "") + '" placeholder="/opt/agent/bin/agent-cli"></div>' +
+      '<div class="field full"><label>参数 · 每行一个</label><textarea name="args" placeholder="--print&#10;{prompt}">' + esc(command.slice(1).join("\n")) + '</textarea><span class="field-note">支持 {prompt}、{cwd}、{issue_id}、{agent_id}。</span></div>' +
+      '<div class="field full"><label>skill 路径 · 每行一个</label><textarea name="skills" placeholder="/opt/skills/rtl-review/SKILL.md">' + esc((agent.skills || []).join("\n")) + '</textarea></div>' +
+      '<div class="field full"><p class="form-error"></p><button class="form-submit">保存更改</button></div></form></div>';
+    layer.querySelector(".modal-close").addEventListener("click", closeModal);
+    layer.addEventListener("click", function (event) { if (event.target === layer) closeModal(); });
+    layer.querySelector("#edit-agent-form").addEventListener("submit", submitAgentEdit);
+    layer.querySelector('input[name="name"]').focus();
   }
 
   function openCreateModal() {
@@ -286,6 +313,33 @@
       closeModal();
       await refresh(true);
       toast("记录已保存");
+    } catch (error) {
+      errorNode.textContent = error.message;
+      button.disabled = false;
+    }
+  }
+
+  async function submitAgentEdit(event) {
+    event.preventDefault();
+    var form = event.currentTarget;
+    var values = new FormData(form);
+    var button = form.querySelector(".form-submit");
+    var errorNode = form.querySelector(".form-error");
+    button.disabled = true;
+    errorNode.textContent = "";
+    try {
+      await api("/api/agents/" + encodeURIComponent(form.dataset.agent), {
+        method: "PUT",
+        body: {
+          name: values.get("name"),
+          role: values.get("role"),
+          command: [values.get("exec")].concat(lines(values.get("args"))),
+          skills: lines(values.get("skills"))
+        }
+      });
+      closeModal();
+      await refresh(true);
+      toast("智能体配置已更新");
     } catch (error) {
       errorNode.textContent = error.message;
       button.disabled = false;
@@ -379,6 +433,17 @@
     if (card && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       openIssue(card.dataset.issue);
+    }
+  });
+  el("agent-list").addEventListener("click", function (event) {
+    var card = event.target.closest("[data-agent]");
+    if (card) openAgentEditor(card.dataset.agent);
+  });
+  el("agent-list").addEventListener("keydown", function (event) {
+    var card = event.target.closest("[data-agent]");
+    if (card && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      openAgentEditor(card.dataset.agent);
     }
   });
   el("squad-list").addEventListener("submit", async function (event) {

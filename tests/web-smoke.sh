@@ -37,6 +37,10 @@ curl -fsS -X POST "$BASE/api/agents" -H 'Content-Type: application/json' \
     --data "{\"id\":\"leader\",\"name\":\"Leader\",\"command\":[\"$FAKE\",\"{prompt}\"],\"skills\":[]}" >/dev/null
 curl -fsS -X POST "$BASE/api/agents" -H 'Content-Type: application/json' \
     --data "{\"id\":\"worker\",\"name\":\"Worker\",\"role\":\"implementation\",\"command\":[\"$FAKE\",\"{prompt}\"],\"skills\":[]}" >/dev/null
+curl -fsS "$BASE/api/agents/worker" | grep '"role":"implementation"' >/dev/null
+curl -fsS -X PUT "$BASE/api/agents/worker" -H 'Content-Type: application/json' \
+    --data "{\"name\":\"Worker Updated\",\"role\":\"implementation and verification\",\"command\":[\"$FAKE\",\"{prompt}\"],\"skills\":[\"/tmp/demo/SKILL.md\"]}" |
+    grep '"name":"Worker Updated"' >/dev/null
 curl -fsS -X POST "$BASE/api/squads" -H 'Content-Type: application/json' \
     --data '{"id":"team","name":"Team","leader_id":"leader","members":[{"agent_id":"worker","role":"implementation"}]}' >/dev/null
 
@@ -50,5 +54,6 @@ curl -fsS "$BASE/api/issues/$issue_id" | grep '"status":"in_review"' >/dev/null
 curl -fsS -X POST "$BASE/api/issues/$issue_id/status" -H 'Content-Type: application/json' \
     --data '{"status":"done"}' | grep '"status":"done"' >/dev/null
 curl -fsS "$BASE/api/state" | grep 'worker completed with verification' >/dev/null
+curl -fsS "$BASE/api/state" | grep 'implementation and verification' >/dev/null
 
 printf 'multica-core Web/API smoke test passed\n'
