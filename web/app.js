@@ -4,15 +4,17 @@
   var state = { agents: [], squads: [], issues: [], runs: [], version: "—" };
   var view = "issues";
   var filter = "all";
+  var searchQuery = "";
   var activeIssue = null;
   var detailBusy = false;
   var themeMode = document.documentElement.dataset.themeMode || "system";
   var systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
-  var statusText = { todo: "Todo", in_progress: "In Progress", in_review: "In Review", done: "Done" };
+  var statusText = { todo: "Todo", queued: "Queued", in_progress: "In Progress", in_review: "In Review", done: "Done", failed: "Failed", cancelled: "Cancelled" };
   var viewText = {
     issues: { title: "任务", subtitle: "跟踪并协调本机智能体工作", create: "新建任务" },
     agents: { title: "智能体", subtitle: "管理命令、职责和 skill", create: "登记智能体" },
-    squads: { title: "小队", subtitle: "由 leader 协调多个智能体", create: "新建小队" }
+    squads: { title: "小队", subtitle: "由 leader 协调多个智能体", create: "新建小队" },
+    data: { title: "数据", subtitle: "备份、恢复和查看本地存储", create: "" }
   };
 
   function el(id) { return document.getElementById(id); }
@@ -43,6 +45,18 @@
   }
   function byId(kind, id) {
     return (state[kind] || []).find(function (item) { return item.id === id; });
+  }
+  function squadReadiness(squad) {
+    var leader = byId("agents", squad.leader_id);
+    if (!leader) return "Leader 配置不存在";
+    if (leader.enabled === false) return "Leader 已停用";
+    if (!(squad.members || []).length) return "尚无成员";
+    for (var i = 0; i < squad.members.length; i += 1) {
+      var member = byId("agents", squad.members[i].agent_id);
+      if (!member) return "成员 " + squad.members[i].agent_id + " 不存在";
+      if (member.enabled === false) return "成员 " + (member.name || member.id) + " 已停用";
+    }
+    return "";
   }
   function assigneeName(issue) {
     var item = byId(issue.assignee_type === "agent" ? "agents" : "squads", issue.assignee_id);
@@ -120,6 +134,7 @@
     el("nav-squad-count").textContent = state.squads.length;
     el("working-count").textContent = runningAgents.size;
     el("version").textContent = "Core " + state.version;
+    if (el("data-directory")) el("data-directory").textContent = state.data_dir || "—";
   }
 
   function renderIssueCard(issue) {
@@ -127,7 +142,11 @@
     var running = isIssueRunning(issue);
     return '<article class="issue-card" data-issue="' + esc(issue.id) + '" tabindex="0">' +
       '<div class="issue-card-top"><span class="issue-id">↗ ' + esc(issue.id.toUpperCase()) + '</span>' +
-      (running ? '<span class="run-badge"><i></i>运行中</span>' : '<span class="issue-signal">⌁</span>') + '</div>' +
+      (running || issue.status === "queued" || issue.status === "in_progress"
+        ? '<span class="run-badge"><i></i>' + esc(issue.status === "queued" ? "排队中" : "运行中") + '</span>'
+        : (issue.status === "failed" || issue.status === "cancelled"
+          ? '<span class="issue-state issue-state-' + esc(issue.status) + '">' + esc(statusText[issue.status]) + '</span>'
+          : '<span class="issue-signal">⌁</span>')) + '</div>' +
       '<h3>' + esc(issue.title) + '</h3><p>' + esc(truncate(issue.description, 82)) + '</p>' +
       '<footer class="issue-card-footer"><span class="assignee-avatar">' + esc(avatarText(name)) + '</span>' +
       '<span class="assignee-name">' + esc(name) + '</span><time class="timestamp">' + esc(formatTime(issue.updated_at)) + '</time></footer>' +
@@ -137,14 +156,19 @@
   function renderIssues() {
     var allIssues = state.issues.slice().sort(function (a, b) { return String(b.id).localeCompare(String(a.id)); });
     var issues = filter === "all" ? allIssues : allIssues.filter(function (issue) { return issue.assignee_type === filter; });
+    if (searchQuery) {
+      issues = issues.filter(function (issue) {
+        return [issue.id, issue.title, issue.description, assigneeName(issue)].join(" ").toLowerCase().includes(searchQuery);
+      });
+    }
     var columns = [
-      { status: "todo", label: "Todo" },
-      { status: "in_progress", label: "In Progress" },
-      { status: "in_review", label: "In Review" },
-      { status: "done", label: "Done" }
+      { statuses: ["todo", "failed", "cancelled"], status: "todo", label: "Todo / Needs action" },
+      { statuses: ["queued", "in_progress"], status: "in_progress", label: "In Progress" },
+      { statuses: ["in_review"], status: "in_review", label: "In Review" },
+      { statuses: ["done"], status: "done", label: "Done" }
     ];
     el("issue-list").innerHTML = columns.map(function (column) {
-      var items = issues.filter(function (issue) { return issue.status === column.status; });
+      var items = issues.filter(function (issue) { return column.statuses.includes(issue.status); });
       return '<section class="kanban-column" data-status="' + column.status + '">' +
         '<header class="column-head"><i></i><strong>' + column.label + '</strong><span>' + items.length + '</span><button type="button" aria-label="更多">···</button></header>' +
         '<div class="column-cards">' + items.map(renderIssueCard).join("") + '</div></section>';
@@ -164,6 +188,7 @@
       });
       return '<article class="node-card agent-card" data-agent="' + esc(agent.id) + '" tabindex="0" aria-label="查看并编辑智能体 ' + esc(agent.name || agent.id) + '"><span class="node-index">AGENT ' + two(index + 1) + '</span>' +
         '<h3>' + esc(agent.name || agent.id) + '</h3><span class="node-id">@' + esc(agent.id) + '</span>' +
+        (agent.enabled === false ? '<span class="config-warning">已停用 · 不接收任务</span>' : '') +
         '<p class="node-role">' + esc(agent.role || "未设置职责") + '</p>' +
         '<div class="command-line">$ ' + esc((agent.command || []).join(" ")) + '</div>' +
         '<div class="tag-row">' + (skills.length ? skills.map(function (skill) { return '<span class="tag">' + esc(skill) + '</span>'; }).join("") : '<span class="tag">未配置 skill</span>') + '</div>' +
@@ -176,19 +201,17 @@
     el("squad-empty").classList.toggle("hidden", state.squads.length > 0);
     el("squad-list").innerHTML = state.squads.map(function (squad, index) {
       var leader = byId("agents", squad.leader_id);
-      var existing = new Set((squad.members || []).map(function (member) { return member.agent_id; }).concat([squad.leader_id]));
-      var candidates = state.agents.filter(function (agent) { return !existing.has(agent.id); });
+      var readinessError = squadReadiness(squad);
       var roster = '<div class="roster-line"><b>LEADER</b><span>' + esc(leader ? leader.name : squad.leader_id) + ' <small>@' + esc(squad.leader_id) + '</small></span></div>';
       roster += (squad.members || []).map(function (member) {
         var agent = byId("agents", member.agent_id);
         return '<div class="roster-line worker"><b>MEMBER</b><span>' + esc(agent ? agent.name : member.agent_id) + ' · ' + esc(member.role || "未设置职责") + '</span></div>';
       }).join("");
-      var add = candidates.length ? '<form class="member-form" data-squad="' + esc(squad.id) + '"><select name="agent_id" aria-label="选择新成员">' +
-        candidates.map(function (agent) { return '<option value="' + esc(agent.id) + '">' + esc(agent.name || agent.id) + '</option>'; }).join("") +
-        '</select><button class="mini-button" type="submit">添加成员</button></form>' : "";
-      return '<article class="node-card"><span class="node-index">SQUAD ' + two(index + 1) + '</span>' +
+      return '<article class="node-card squad-card" data-squad="' + esc(squad.id) + '" tabindex="0" aria-label="查看并编辑小队 ' + esc(squad.name || squad.id) + '"><span class="node-index">SQUAD ' + two(index + 1) + '</span>' +
         '<h3>' + esc(squad.name || squad.id) + '</h3><span class="node-id">#' + esc(squad.id) + '</span>' +
-        '<div class="squad-roster">' + roster + '</div>' + add + '</article>';
+        (readinessError ? '<span class="config-warning">' + esc(readinessError) + ' · 不可运行</span>' : '') +
+        '<div class="squad-roster">' + roster + '</div>' +
+        '<footer class="node-card-action"><span>' + esc(squad.updated_at ? "更新于 " + formatTime(squad.updated_at) : "创建于 " + formatTime(squad.created_at)) + '</span><b>查看与编辑&nbsp; →</b></footer></article>';
     }).join("");
   }
 
@@ -207,6 +230,7 @@
     el("tab-title").textContent = viewText[next].title;
     el("view-subtitle").textContent = viewText[next].subtitle;
     el("create-button").innerHTML = '<span>＋</span> ' + viewText[next].create;
+    el("create-button").classList.toggle("hidden", next === "data");
   }
 
   function addOverlay(className) {
@@ -219,10 +243,26 @@
     var layer = document.querySelector(".modal-layer");
     if (layer) layer.remove();
   }
-  function optionsForAssignees() {
-    var agents = state.agents.map(function (agent) { return '<option value="agent:' + esc(agent.id) + '">智能体 · ' + esc(agent.name || agent.id) + '</option>'; });
-    var squads = state.squads.map(function (squad) { return '<option value="squad:' + esc(squad.id) + '">小队 · ' + esc(squad.name || squad.id) + '</option>'; });
+  function optionsForAssignees(selected) {
+    var agents = state.agents.filter(function (agent) {
+      return agent.enabled !== false || "agent:" + agent.id === selected;
+    }).map(function (agent) {
+      var value = "agent:" + agent.id;
+      return '<option value="' + esc(value) + '"' + (value === selected ? " selected" : "") + '>智能体 · ' + esc(agent.name || agent.id) + (agent.enabled === false ? '（已停用）' : '') + '</option>';
+    });
+    var squads = state.squads.filter(function (squad) {
+      return !squadReadiness(squad) || "squad:" + squad.id === selected;
+    }).map(function (squad) {
+      var value = "squad:" + squad.id;
+      var warning = squadReadiness(squad);
+      return '<option value="' + esc(value) + '"' + (value === selected ? " selected" : "") + '>小队 · ' + esc(squad.name || squad.id) + (warning ? '（' + esc(warning) + '）' : '') + '</option>';
+    });
     return agents.concat(squads).join("");
+  }
+  function optionsForAgents(selected) {
+    return state.agents.map(function (agent) {
+      return '<option value="' + esc(agent.id) + '"' + (agent.id === selected ? " selected" : "") + '>' + esc(agent.name || agent.id) + ' · @' + esc(agent.id) + '</option>';
+    }).join("");
   }
 
   function openAgentEditor(id) {
@@ -239,14 +279,93 @@
       '<div class="field full"><label>可执行文件 *</label><input name="exec" required value="' + esc(command[0] || "") + '" placeholder="/opt/agent/bin/agent-cli"></div>' +
       '<div class="field full"><label>参数 · 每行一个</label><textarea name="args" placeholder="--print&#10;{prompt}">' + esc(command.slice(1).join("\n")) + '</textarea><span class="field-note">支持 {prompt}、{cwd}、{issue_id}、{agent_id}。</span></div>' +
       '<div class="field full"><label>skill 路径 · 每行一个</label><textarea name="skills" placeholder="/opt/skills/rtl-review/SKILL.md">' + esc((agent.skills || []).join("\n")) + '</textarea></div>' +
-      '<div class="field full"><p class="form-error"></p><button class="form-submit">保存更改</button></div></form></div>';
+      '<label class="check-field full"><input name="enabled" type="checkbox"' + (agent.enabled === false ? "" : " checked") + '><span><b>启用这个智能体</b><small>停用后保留配置和历史记录，但不能接收新任务。</small></span></label>' +
+      '<div class="field full"><div class="test-result" id="agent-test-result"></div><p class="form-error"></p><div class="form-actions"><button class="danger-button" id="delete-agent" type="button">删除智能体</button><button class="soft-button" id="test-agent" type="button">测试连接</button><button class="form-submit">保存更改</button></div></div></form></div>';
     layer.querySelector(".modal-close").addEventListener("click", closeModal);
     layer.addEventListener("click", function (event) { if (event.target === layer) closeModal(); });
     layer.querySelector("#edit-agent-form").addEventListener("submit", submitAgentEdit);
+    layer.querySelector("#test-agent").addEventListener("click", function () { testAgent(id, layer); });
+    layer.querySelector("#delete-agent").addEventListener("click", function () { deleteAgent(id, agent.name || id); });
     layer.querySelector('input[name="name"]').focus();
   }
 
+  function squadMemberEditorRow(member) {
+    member = member || {};
+    return '<div class="squad-member-edit">' +
+      '<select name="member_agent" aria-label="小队成员">' + optionsForAgents(member.agent_id) + '</select>' +
+      '<input name="member_role" value="' + esc(member.role || "") + '" placeholder="成员职责">' +
+      '<button class="remove-member" type="button" aria-label="移除成员">×</button></div>';
+  }
+
+  function openSquadEditor(id) {
+    var squad = byId("squads", id);
+    if (!squad) return toast("找不到这个小队", true);
+    var leader = byId("agents", squad.leader_id);
+    var members = (squad.members || []).map(squadMemberEditorRow).join("");
+    var layer = addOverlay("modal-layer open");
+    layer.innerHTML = '<div class="modal squad-editor"><button class="modal-close" aria-label="关闭">×</button>' +
+      '<p class="eyebrow">SQUAD PROFILE</p><div class="editor-heading"><div><h2>' + esc(squad.name || squad.id) + '</h2><p>创建于 ' + esc(formatFullTime(squad.created_at)) + '</p></div><span class="profile-avatar">' + esc(avatarText(squad.name || squad.id)) + '</span></div>' +
+      '<form id="edit-squad-form" class="form-grid" data-squad="' + esc(squad.id) + '">' +
+      '<div class="field"><label>ID</label><input name="id" value="' + esc(squad.id) + '" readonly><span class="field-note">ID 被任务引用，创建后不可修改。</span></div>' +
+      '<div class="field"><label>小队名称</label><input name="name" value="' + esc(squad.name || "") + '" placeholder="Verification Team"></div>' +
+      '<div class="field full"><label>Leader *</label><select name="leader_id" required>' + optionsForAgents(squad.leader_id) + '</select><span class="field-note">当前 Leader：' + esc(leader ? leader.name : squad.leader_id) + '</span></div>' +
+      '<div class="field full squad-editor-members"><div class="member-editor-heading"><label>成员与职责</label><button id="add-squad-member" class="mini-button" type="button">＋ 添加成员</button></div>' +
+      '<div id="squad-members-editor">' + (members || '<p class="member-empty">尚未添加成员</p>') + '</div></div>' +
+      '<div class="field full"><span class="field-note">Leader 不能同时作为成员，同一成员不能重复添加。</span><p class="form-error"></p><div class="form-actions"><button class="danger-button" id="delete-squad" type="button">删除小队</button><span></span><button class="form-submit">保存小队</button></div></div></form></div>';
+    layer.querySelector(".modal-close").addEventListener("click", closeModal);
+    layer.addEventListener("click", function (event) { if (event.target === layer) closeModal(); });
+    layer.querySelector("#edit-squad-form").addEventListener("submit", submitSquadEdit);
+    layer.querySelector("#delete-squad").addEventListener("click", function () { deleteSquad(id, squad.name || id); });
+    layer.querySelector("#add-squad-member").addEventListener("click", function () {
+      var form = layer.querySelector("#edit-squad-form");
+      var selected = Array.from(form.querySelectorAll('[name="member_agent"]')).map(function (node) { return node.value; });
+      selected.push(form.leader_id.value);
+      var candidate = state.agents.find(function (agent) { return !selected.includes(agent.id); });
+      if (!candidate) return toast("没有可添加的智能体", true);
+      var container = layer.querySelector("#squad-members-editor");
+      var empty = container.querySelector(".member-empty");
+      if (empty) empty.remove();
+      container.insertAdjacentHTML("beforeend", squadMemberEditorRow({ agent_id: candidate.id, role: candidate.role || "" }));
+    });
+    layer.querySelector("#squad-members-editor").addEventListener("click", function (event) {
+      var remove = event.target.closest(".remove-member");
+      if (!remove) return;
+      remove.closest(".squad-member-edit").remove();
+      var container = layer.querySelector("#squad-members-editor");
+      if (!container.querySelector(".squad-member-edit")) container.innerHTML = '<p class="member-empty">尚未添加成员</p>';
+    });
+    layer.querySelector('input[name="name"]').focus();
+  }
+
+  function openIssueEditor(issue) {
+    var layer = addOverlay("modal-layer open");
+    layer.innerHTML = '<div class="modal"><button class="modal-close" aria-label="关闭">×</button>' +
+      '<p class="eyebrow">EDIT ISSUE</p><h2>编辑任务</h2><form id="edit-issue-form" class="form-grid" data-issue="' + esc(issue.id) + '">' +
+      '<div class="field full"><label>标题 *</label><input name="title" required maxlength="160" value="' + esc(issue.title) + '"></div>' +
+      '<div class="field full"><label>任务描述 *</label><textarea name="description" required>' + esc(issue.description) + '</textarea></div>' +
+      '<div class="field"><label>负责人 *</label><select name="assignee" required>' + optionsForAssignees(issue.assignee_type + ":" + issue.assignee_id) + '</select></div>' +
+      '<div class="field"><label>工作目录 *</label><input name="cwd" required value="' + esc(issue.cwd) + '"></div>' +
+      '<div class="field"><label>完成策略</label><select name="review_policy"><option value="auto"' + (issue.review_policy !== "manual" ? " selected" : "") + '>自动完成</option><option value="manual"' + (issue.review_policy === "manual" ? " selected" : "") + '>需要人工验收</option></select></div>' +
+      '<div class="field"><label>单次超时 · 秒</label><input name="timeout_seconds" type="number" min="1" max="86400" value="' + esc(issue.timeout_seconds || 900) + '"></div>' +
+      '<div class="field"><label>失败重试次数</label><input name="max_retries" type="number" min="0" max="10" value="' + esc(issue.max_retries || 0) + '"></div>' +
+      '<div class="field full"><p class="form-error"></p><button class="form-submit">保存任务</button></div></form></div>';
+    layer.querySelector(".modal-close").addEventListener("click", closeModal);
+    layer.addEventListener("click", function (event) { if (event.target === layer) closeModal(); });
+    layer.querySelector("#edit-issue-form").addEventListener("submit", submitIssueEdit);
+    layer.querySelector('input[name="title"]').focus();
+  }
+
   function openCreateModal() {
+    if (view === "issues" && !optionsForAssignees()) {
+      switchView("agents");
+      toast("请先登记并启用一个智能体，或配置一个可运行小队", true);
+      return;
+    }
+    if (view === "squads" && state.agents.length < 2) {
+      switchView("agents");
+      toast("创建小队至少需要两个智能体", true);
+      return;
+    }
     var layer = addOverlay("modal-layer open");
     var content = "";
     if (view === "issues") {
@@ -255,6 +374,9 @@
         '<div class="field full"><label>任务描述 *</label><textarea name="description" required placeholder="说明目标、边界和验收条件"></textarea></div>' +
         '<div class="field"><label>负责人 *</label><select name="assignee" required>' + optionsForAssignees() + '</select></div>' +
         '<div class="field"><label>工作目录 *</label><input name="cwd" required value="." placeholder="/path/to/project"></div>' +
+        '<div class="field"><label>完成策略</label><select name="review_policy"><option value="auto">自动完成</option><option value="manual">需要人工验收</option></select></div>' +
+        '<div class="field"><label>单次超时 · 秒</label><input name="timeout_seconds" type="number" min="1" max="86400" value="900"></div>' +
+        '<div class="field"><label>失败重试次数</label><input name="max_retries" type="number" min="0" max="10" value="0"></div>' +
         '<div class="field full"><span class="field-note">目录必须已存在于运行 multica-core 的机器上。</span><p class="form-error"></p><button class="form-submit">创建任务</button></div></form>';
     } else if (view === "agents") {
       content = '<p class="eyebrow">NEW AGENT</p><h2>登记智能体</h2><form id="create-form" class="form-grid">' +
@@ -265,7 +387,7 @@
         '<div class="field full"><label>参数 · 每行一个</label><textarea name="args" placeholder="run&#10;--prompt&#10;{prompt}">{prompt}</textarea><span class="field-note">支持 {prompt}、{cwd}、{issue_id}、{agent_id}。</span></div>' +
         '<div class="field full"><label>skill 路径 · 每行一个</label><textarea name="skills" placeholder="/opt/skills/rtl-review/SKILL.md"></textarea><p class="form-error"></p><button class="form-submit">登记智能体</button></div></form>';
     } else {
-      var agentOptions = state.agents.map(function (agent) { return '<option value="' + esc(agent.id) + '">' + esc(agent.name || agent.id) + ' · @' + esc(agent.id) + '</option>'; }).join("");
+      var agentOptions = optionsForAgents();
       content = '<p class="eyebrow">NEW SQUAD</p><h2>新建小队</h2><form id="create-form" class="form-grid">' +
         '<div class="field"><label>ID *</label><input name="id" required pattern="[A-Za-z0-9._-]+" placeholder="verification-team"></div>' +
         '<div class="field"><label>小队名称</label><input name="name" placeholder="Verification Team"></div>' +
@@ -298,7 +420,7 @@
       var path;
       if (view === "issues") {
         var parts = values.get("assignee").split(":");
-        body = { title: values.get("title"), description: values.get("description"), assignee_type: parts[0], assignee_id: parts.slice(1).join(":"), cwd: values.get("cwd") };
+        body = { title: values.get("title"), description: values.get("description"), assignee_type: parts[0], assignee_id: parts.slice(1).join(":"), cwd: values.get("cwd"), review_policy: values.get("review_policy"), timeout_seconds: Number(values.get("timeout_seconds")), max_retries: Number(values.get("max_retries")) };
         path = "/api/issues";
       } else if (view === "agents") {
         body = { id: values.get("id"), name: values.get("name"), role: values.get("role"), command: [values.get("exec")].concat(lines(values.get("args"))), skills: lines(values.get("skills")) };
@@ -334,7 +456,8 @@
           name: values.get("name"),
           role: values.get("role"),
           command: [values.get("exec")].concat(lines(values.get("args"))),
-          skills: lines(values.get("skills"))
+          skills: lines(values.get("skills")),
+          enabled: values.get("enabled") === "on"
         }
       });
       closeModal();
@@ -344,6 +467,127 @@
       errorNode.textContent = error.message;
       button.disabled = false;
     }
+  }
+
+  async function testAgent(id, layer) {
+    var button = layer.querySelector("#test-agent");
+    var resultNode = layer.querySelector("#agent-test-result");
+    button.disabled = true;
+    resultNode.className = "test-result pending";
+    resultNode.textContent = "正在调用智能体执行最小测试…";
+    try {
+      var result = await api("/api/agents/" + encodeURIComponent(id) + "/test", { method: "POST", body: { cwd: "." } });
+      resultNode.className = "test-result " + (result.ok ? "success" : "error");
+      resultNode.textContent = "退出码 " + result.exit_code + "\n" + (result.output || "没有输出");
+    } catch (error) {
+      resultNode.className = "test-result error";
+      resultNode.textContent = error.message;
+    }
+    button.disabled = false;
+  }
+
+  async function deleteAgent(id, name) {
+    if (!window.confirm("删除智能体“" + name + "”？如果它仍被小队或任务引用，系统会拒绝删除。")) return;
+    try {
+      await api("/api/agents/" + encodeURIComponent(id), { method: "DELETE" });
+      closeModal();
+      await refresh(true);
+      toast("智能体已删除");
+    } catch (error) { toast(error.message, true); }
+  }
+
+  async function submitSquadEdit(event) {
+    event.preventDefault();
+    var form = event.currentTarget;
+    var values = new FormData(form);
+    var button = form.querySelector(".form-submit");
+    var errorNode = form.querySelector(".form-error");
+    var memberRows = Array.from(form.querySelectorAll(".squad-member-edit"));
+    var members = memberRows.map(function (row) {
+      return { agent_id: row.querySelector('[name="member_agent"]').value, role: row.querySelector('[name="member_role"]').value };
+    });
+    var memberIds = members.map(function (member) { return member.agent_id; });
+    button.disabled = true;
+    errorNode.textContent = "";
+    try {
+      if (memberIds.includes(values.get("leader_id"))) throw new Error("Leader 不能同时作为成员");
+      if (new Set(memberIds).size !== memberIds.length) throw new Error("同一成员不能重复添加");
+      await api("/api/squads/" + encodeURIComponent(form.dataset.squad), {
+        method: "PUT",
+        body: { name: values.get("name"), leader_id: values.get("leader_id"), members: members }
+      });
+      closeModal();
+      await refresh(true);
+      toast("小队配置已更新");
+    } catch (error) {
+      errorNode.textContent = error.message;
+      button.disabled = false;
+    }
+  }
+
+  async function deleteSquad(id, name) {
+    if (!window.confirm("删除小队“" + name + "”？如果仍有任务引用它，系统会拒绝删除。")) return;
+    try {
+      await api("/api/squads/" + encodeURIComponent(id), { method: "DELETE" });
+      closeModal();
+      await refresh(true);
+      toast("小队已删除");
+    } catch (error) { toast(error.message, true); }
+  }
+
+  async function submitIssueEdit(event) {
+    event.preventDefault();
+    var form = event.currentTarget;
+    var values = new FormData(form);
+    var button = form.querySelector(".form-submit");
+    var errorNode = form.querySelector(".form-error");
+    var assignee = values.get("assignee").split(":");
+    button.disabled = true;
+    errorNode.textContent = "";
+    try {
+      await api("/api/issues/" + encodeURIComponent(form.dataset.issue), {
+        method: "PUT",
+        body: {
+          title: values.get("title"), description: values.get("description"),
+          assignee_type: assignee[0], assignee_id: assignee.slice(1).join(":"), cwd: values.get("cwd"),
+          review_policy: values.get("review_policy"), timeout_seconds: Number(values.get("timeout_seconds")),
+          max_retries: Number(values.get("max_retries"))
+        }
+      });
+      var id = form.dataset.issue;
+      closeModal();
+      await refresh(true);
+      await openIssue(id, true);
+      toast("任务已更新");
+    } catch (error) {
+      errorNode.textContent = error.message;
+      button.disabled = false;
+    }
+  }
+
+  async function duplicateIssue(issue) {
+    try {
+      var copy = await api("/api/issues", { method: "POST", body: {
+        title: issue.title + " · 副本", description: issue.description,
+        assignee_type: issue.assignee_type, assignee_id: issue.assignee_id, cwd: issue.cwd,
+        review_policy: issue.review_policy || "auto", timeout_seconds: issue.timeout_seconds || 900,
+        max_retries: issue.max_retries || 0
+      } });
+      closeDetail();
+      await refresh(true);
+      await openIssue(copy.id);
+      toast("任务副本已创建");
+    } catch (error) { toast(error.message, true); }
+  }
+
+  async function deleteIssue(issue) {
+    if (!window.confirm("删除任务“" + issue.title + "”？相关评论和运行记录也会删除。")) return;
+    try {
+      await api("/api/issues/" + encodeURIComponent(issue.id), { method: "DELETE" });
+      closeDetail();
+      await refresh(true);
+      toast("任务已删除");
+    } catch (error) { toast(error.message, true); }
   }
 
   async function openIssue(id, silent) {
@@ -356,20 +600,36 @@
       if (!silent) toast(error.message, true);
     }
   }
+  function runDuration(run) {
+    if (!run.started_at || !run.finished_at) return "运行中";
+    var seconds = Math.max(0, Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000));
+    return seconds < 60 ? seconds + " 秒" : Math.floor(seconds / 60) + " 分 " + (seconds % 60) + " 秒";
+  }
+  function renderRun(run) {
+    var statusClass = run.status === "completed" ? "done" : (run.status === "running" ? "in_progress" : "failed");
+    return '<details class="run-detail"><summary class="run-row"><span>' + esc(run.id) + '</span><span>@' + esc(run.agent_id) + ' · ' + esc(run.trigger) + ' · ' + esc(runDuration(run)) + '</span><span class="status-' + statusClass + '">' + esc(String(run.status || "unknown").toUpperCase()) + '</span></summary>' +
+      '<div class="run-body"><div><small>退出码</small><b>' + esc(run.exit_code == null ? "—" : run.exit_code) + '</b></div><div><small>失败原因</small><b>' + esc(run.failure_reason || "—") + '</b></div>' +
+      '<h4>输出</h4><pre>' + esc(run.output || "没有输出") + '</pre>' +
+      '<details class="prompt-snapshot"><summary>查看本次提示快照</summary><pre>' + esc(run.prompt || "旧记录没有提示快照") + '</pre></details></div></details>';
+  }
   function renderDetail(issue) {
     if (activeIssue !== issue.id) return;
     var panel = el("detail-panel");
     var comments = issue.comments || [];
     var runs = issue.runs || [];
+    var busy = issue.status === "queued" || issue.status === "in_progress" || detailBusy;
     panel.innerHTML = '<button class="detail-close" aria-label="关闭">×</button>' +
       '<div class="detail-title"><p class="eyebrow">' + esc(issue.id.toUpperCase()) + '</p><h2>' + esc(issue.title) + '</h2><p>' + esc(issue.description) + '</p></div>' +
-      '<div class="detail-meta"><div><small>负责人</small><span>' + esc(assigneeName(issue)) + '</span></div><div><small>状态</small><span class="status status-' + esc(issue.status) + '">' + esc(statusText[issue.status] || issue.status) + '</span></div><div><small>工作目录</small><span>' + esc(issue.cwd) + '</span></div><div><small>最近更新</small><span>' + esc(formatTime(issue.updated_at)) + '</span></div></div>' +
-      '<div class="detail-actions"><button id="run-issue" class="' + (detailBusy ? "running" : "") + '">' + (detailBusy ? "智能体运行中..." : "▶ 运行任务") + '</button><select id="issue-status" aria-label="修改任务状态">' +
+      '<div class="detail-meta"><div><small>负责人</small><span>' + esc(assigneeName(issue)) + '</span></div><div><small>状态</small><span class="status status-' + esc(issue.status) + '">' + esc(statusText[issue.status] || issue.status) + '</span></div><div><small>工作目录</small><span>' + esc(issue.cwd) + '</span></div><div><small>完成策略</small><span>' + esc(issue.review_policy === "manual" ? "人工验收" : "自动完成") + '</span></div><div><small>超时</small><span>' + esc(issue.timeout_seconds || 900) + ' 秒</span></div><div><small>失败重试</small><span>' + esc(issue.max_retries || 0) + ' 次</span></div></div>' +
+      (issue.last_error ? '<div class="error-banner"><b>最近错误</b><span>' + esc(issue.last_error) + '</span></div>' : '') +
+      '<div class="detail-actions"><button id="run-issue" class="' + (busy ? "running" : "") + '"' + (busy ? " disabled" : "") + '>▶ ' + (busy ? "任务运行中" : (issue.status === "failed" || issue.status === "cancelled" ? "重新运行" : "运行任务")) + '</button>' +
+      (busy ? '<button id="cancel-issue" class="cancel-button">■ 取消</button>' : '') +
+      '<button id="edit-issue" class="secondary-action">编辑</button><button id="copy-issue" class="secondary-action">复制</button><button id="delete-issue" class="danger-action">删除</button><select id="issue-status" aria-label="修改任务状态">' +
       Object.keys(statusText).map(function (status) { return '<option value="' + status + '"' + (status === issue.status ? " selected" : "") + '>' + esc(statusText[status]) + '</option>'; }).join("") + '</select></div>' +
       '<h3 class="subhead">评论时间线 · ' + comments.length + '</h3><div class="timeline">' +
       (comments.length ? comments.map(function (comment) { return '<article class="timeline-entry"><header><span>' + esc(comment.author_name || comment.author_id) + '</span><time>' + esc(formatTime(comment.created_at)) + '</time></header><pre>' + esc(comment.content) + '</pre></article>'; }).join("") : '<p class="node-role">尚无智能体回复。</p>') +
-      '</div><h3 class="subhead">运行记录 · ' + runs.length + '</h3><div>' +
-      (runs.length ? runs.map(function (run) { return '<div class="run-row"><span>' + esc(run.id) + '</span><span>@' + esc(run.agent_id) + ' · ' + esc(run.trigger) + '</span><span class="status-' + esc(run.status === "completed" ? "done" : run.status === "running" ? "in_progress" : "todo") + '">' + esc(run.status.toUpperCase()) + '</span></div>'; }).join("") : '<p class="node-role">尚无运行记录。</p>') + '</div>';
+      '</div><form class="comment-form" id="comment-form"><textarea name="content" required placeholder="补充要求、反馈或返工说明…"></textarea><button type="submit">添加评论</button></form><h3 class="subhead">运行记录 · ' + runs.length + '</h3><div>' +
+      (runs.length ? runs.map(renderRun).join("") : '<p class="node-role">尚无运行记录。</p>') + '</div>';
     panel.classList.add("open");
     panel.setAttribute("aria-hidden", "false");
     var scrim = document.querySelector(".scrim");
@@ -377,6 +637,12 @@
     panel.querySelector(".detail-close").addEventListener("click", closeDetail);
     scrim.onclick = closeDetail;
     panel.querySelector("#run-issue").addEventListener("click", runActiveIssue);
+    var cancelButton = panel.querySelector("#cancel-issue");
+    if (cancelButton) cancelButton.addEventListener("click", cancelActiveIssue);
+    panel.querySelector("#edit-issue").addEventListener("click", function () { openIssueEditor(issue); });
+    panel.querySelector("#copy-issue").addEventListener("click", function () { duplicateIssue(issue); });
+    panel.querySelector("#delete-issue").addEventListener("click", function () { deleteIssue(issue); });
+    panel.querySelector("#comment-form").addEventListener("submit", addIssueComment);
     panel.querySelector("#issue-status").addEventListener("change", changeIssueStatus);
   }
   function closeDetail() {
@@ -392,12 +658,21 @@
     await openIssue(activeIssue, true);
     var id = activeIssue;
     try {
-      var result = await api("/api/issues/" + encodeURIComponent(id) + "/run", { method: "POST", body: { max_runs: 16 } });
-      toast(result.exit_code === 0 ? "协作运行结束，等待复核" : "运行结束，但智能体返回失败", result.exit_code !== 0);
+      await api("/api/issues/" + encodeURIComponent(id) + "/run", { method: "POST", body: { max_runs: 16 } });
+      toast("任务已进入本地运行队列");
     } catch (error) { toast(error.message, true); }
     detailBusy = false;
     await refresh(true);
     if (activeIssue === id) await openIssue(id, true);
+  }
+  async function cancelActiveIssue() {
+    if (!activeIssue) return;
+    var id = activeIssue;
+    try {
+      await api("/api/issues/" + encodeURIComponent(id) + "/cancel", { method: "POST" });
+      toast("已请求取消，正在清理智能体进程");
+      await openIssue(id, true);
+    } catch (error) { toast(error.message, true); }
   }
   async function changeIssueStatus(event) {
     if (!activeIssue) return;
@@ -408,6 +683,37 @@
       await openIssue(id, true);
       toast("任务状态已更新");
     } catch (error) { toast(error.message, true); }
+  }
+  async function addIssueComment(event) {
+    event.preventDefault();
+    if (!activeIssue) return;
+    var form = event.currentTarget;
+    var content = form.content.value.trim();
+    if (!content) return;
+    try {
+      await api("/api/issues/" + encodeURIComponent(activeIssue) + "/comments", { method: "POST", body: { content: content } });
+      var id = activeIssue;
+      await refresh(true);
+      await openIssue(id, true);
+      toast("评论已添加");
+    } catch (error) { toast(error.message, true); }
+  }
+
+  async function importData() {
+    var file = el("import-file").files[0];
+    var errorNode = el("import-error");
+    errorNode.textContent = "";
+    if (!file) {
+      errorNode.textContent = "请先选择一个 JSON 备份文件。";
+      return;
+    }
+    if (!window.confirm("导入会替换当前工作区数据。服务器会先自动备份现有数据，是否继续？")) return;
+    try {
+      var bundle = JSON.parse(await file.text());
+      await api("/api/import", { method: "POST", body: bundle });
+      await refresh(true);
+      toast("数据已导入，原数据已自动备份");
+    } catch (error) { errorNode.textContent = error.message; }
   }
 
   document.querySelectorAll(".nav-item").forEach(function (button) {
@@ -423,7 +729,11 @@
   el("refresh").addEventListener("click", function () { refresh(false); });
   el("create-button").addEventListener("click", openCreateModal);
   el("sidebar-create").addEventListener("click", function () { switchView("issues"); openCreateModal(); });
-  el("sidebar-search").addEventListener("click", function () { switchView("issues"); toast("可按负责人筛选任务"); });
+  el("sidebar-search").addEventListener("click", function () { switchView("issues"); el("issue-search").focus(); });
+  el("issue-search").addEventListener("input", function (event) {
+    searchQuery = event.target.value.trim().toLowerCase();
+    renderIssues();
+  });
   el("issue-list").addEventListener("click", function (event) {
     var card = event.target.closest("[data-issue]");
     if (card) openIssue(card.dataset.issue);
@@ -446,16 +756,24 @@
       openAgentEditor(card.dataset.agent);
     }
   });
-  el("squad-list").addEventListener("submit", async function (event) {
-    var form = event.target.closest(".member-form");
-    if (!form) return;
-    event.preventDefault();
-    try {
-      await api("/api/squads/" + encodeURIComponent(form.dataset.squad) + "/members", { method: "POST", body: { agent_id: form.agent_id.value } });
-      await refresh(true);
-      toast("成员已加入小队");
-    } catch (error) { toast(error.message, true); }
+  el("squad-list").addEventListener("click", function (event) {
+    var card = event.target.closest("[data-squad]");
+    if (card) openSquadEditor(card.dataset.squad);
   });
+  el("squad-list").addEventListener("keydown", function (event) {
+    var card = event.target.closest("[data-squad]");
+    if (card && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      openSquadEditor(card.dataset.squad);
+    }
+  });
+  el("export-data").addEventListener("click", function () {
+    var link = document.createElement("a");
+    link.href = "/api/export";
+    link.download = "multica-mini-backup.json";
+    link.click();
+  });
+  el("import-data").addEventListener("click", importData);
   el("theme-toggle").addEventListener("click", function (event) {
     event.stopPropagation();
     var open = !el("theme-menu").classList.contains("open");

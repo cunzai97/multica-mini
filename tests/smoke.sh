@@ -25,8 +25,14 @@ issue_id=$("$BIN" issue create --data-dir "$TMP/data" \
 "$BIN" run "$issue_id" --data-dir "$TMP/data" --max-runs 4 >/dev/null
 result=$("$BIN" issue show "$issue_id" --data-dir "$TMP/data")
 
-printf '%s\n' "$result" | grep '"status": "in_review"' >/dev/null
+printf '%s\n' "$result" | grep '"status": "done"' >/dev/null
+printf '%s\n' "$result" | grep '"review_policy": "auto"' >/dev/null
 printf '%s\n' "$result" | grep 'worker completed with verification' >/dev/null
 test "$(find "$TMP/data/runs" -type f -name '*.json' | wc -l)" -eq 3
+
+"$BIN" data export "$TMP/backup.json" --data-dir "$TMP/data" >/dev/null
+grep '"format": "multica-mini-backup"' "$TMP/backup.json" >/dev/null
+"$BIN" data import "$TMP/backup.json" --data-dir "$TMP/restored" >/dev/null
+"$BIN" issue show "$issue_id" --data-dir "$TMP/restored" | grep '"status": "done"' >/dev/null
 
 printf 'multica-core smoke test passed\n'

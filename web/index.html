@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Multica Mini · 本地协作台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%2320211f'/%3E%3Cpath d='M17 46V18h7l8 13 8-13h7v28h-8V31l-7 11-7-11v15z' fill='white'/%3E%3C/svg%3E">
   <script>
     (function () {
       var saved = "system";
@@ -54,6 +55,10 @@
         <button class="nav-item" data-view="squads">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="9" r="3"></circle><circle cx="17" cy="10" r="2"></circle><path d="M2.5 20c.5-4 2.3-6 5.5-6s5 2 5.5 6M14 15c3.8-.7 6 1 6.5 4"></path></svg>
           <span>小队</span><b id="nav-squad-count">0</b>
+        </button>
+        <button class="nav-item" data-view="data">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6c0-2 16-2 16 0v12c0 2-16 2-16 0Z"></path><path d="M4 6c0 2 16 2 16 0M4 12c0 2 16 2 16 0"></path></svg>
+          <span>数据</span><b>↕</b>
         </button>
       </nav>
 
@@ -105,9 +110,8 @@
               <button data-filter="squad">小队</button>
             </div>
             <div class="toolbar-right">
+              <label class="board-search"><span>⌕</span><input id="issue-search" type="search" placeholder="搜索任务、ID 或负责人"></label>
               <span class="working-pill"><i></i><b id="working-count">0</b> 个智能体工作中</span>
-              <button class="soft-button">⌁ 筛选</button>
-              <button class="soft-button">☷ 显示</button>
               <button class="soft-button active">▥ 看板</button>
             </div>
           </div>
@@ -115,7 +119,7 @@
             <div class="kanban-board" id="issue-list"></div>
           </div>
           <div class="empty-state hidden" id="issue-empty">
-            <div class="empty-icon">✓</div><h2>还没有任务</h2><p>新建任务并交给一个智能体或小队。</p>
+            <div class="empty-icon">1</div><h2>从第一个任务开始</h2><p>先登记并测试智能体，再创建小队或直接把任务交给智能体。</p>
           </div>
           <span class="record-count" id="issue-count">0 个任务</span>
         </section>
@@ -130,6 +134,15 @@
           <div class="section-toolbar"><p>Leader 根据任务内容，通过 mention 将工作交给成员。</p><span class="record-count" id="squad-count">0 个小队</span></div>
           <div class="card-grid" id="squad-list"></div>
           <div class="empty-state hidden" id="squad-empty"><div class="empty-icon">S</div><h2>没有小队</h2><p>选择 leader 并加入至少一名成员。</p></div>
+        </section>
+
+        <section class="view" id="view-data">
+          <div class="section-toolbar"><p>备份或恢复当前本地工作区，导入前会自动保存现有数据。</p><span class="record-count">SCHEMA 2</span></div>
+          <div class="data-console">
+            <article class="data-card"><span class="node-index">LOCAL STORAGE</span><h3>本地数据</h3><p>Agent、Squad、Issue 和 Run 均保存在服务的数据目录中。</p><code id="data-directory">读取中...</code></article>
+            <article class="data-card"><span class="node-index">BACKUP</span><h3>导出工作区</h3><p>生成一个可迁移的 JSON 备份，包含配置、任务、评论和运行记录。</p><button class="primary-button" id="export-data">↓ 下载备份</button></article>
+            <article class="data-card"><span class="node-index">RESTORE</span><h3>导入工作区</h3><p>选择由 Multica Mini 导出的 JSON。导入会替换当前数据并在服务器上先创建备份。</p><input id="import-file" type="file" accept="application/json,.json"><button class="soft-button" id="import-data">↑ 导入并恢复</button><p class="data-error" id="import-error"></p></article>
+          </div>
         </section>
       </main>
     </section>

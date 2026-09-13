@@ -1,179 +1,175 @@
-# Multica Core Offline 设计与使用说明
+# Multica Mini 离线核心版设计说明
 
-## 项目定位
+## 产品边界
 
-Multica Core Offline 是 Multica 的单机离线裁剪版。它保留任务、智能体、小队和
-leader 派发组成的最小协作闭环，用一个静态 Linux 二进制提供调度、JSON API 和本地
-Web 界面。
+Multica Mini 是一个单机、离线优先的多智能体任务协作台。一个静态 Linux 二进制同时
+提供本地 JSON 存储、Agent 进程执行、Squad Leader 调度、HTTP API 和 Web 静态资源。
 
-它适合无法部署 PostgreSQL、Redis、Node.js、Docker 或 Kubernetes 的内网机器，也适合
-CentOS 7、RHEL 8 等较老的 x86_64 Linux 系统。模型和智能体 CLI 由使用者自行准备，
-本程序负责组织任务、构造提示、启动进程并保存结果。
+它保留完成协作任务所需的管理和运维能力，删除账号、计费、Inbox、独立 Chat、
+Project、移动端、外部平台集成、远程 daemon、Autopilot 和 provider 专用配置层。
+本项目不实现 Plan Mode、Ask Gate 或自动收集 workflow/skill。
 
-本项目没有实现此前讨论的 Plan Mode、Ask Gate 或自动收集 workflow/skill 方案。
+## 完整工作链
 
-## 保留的协作闭环
+```text
+创建 Agent → 测试 Agent → 创建 Squad → 创建 Issue → 后台执行
+→ 查看 Run 与评论 → 自动完成或人工验收 → 失败后重试 → 导出备份
+```
 
-1. 用户登记智能体的 ID、职责、命令和 skill 文件。
-2. 任务可以直接分配给一个智能体，也可以分配给小队。
-3. 小队 leader 先读取任务、评论、成员职责和 skill 摘要。
-4. Leader 使用标准 mention 选择成员：
+Issue 可以交给单个 Agent，也可以交给 Squad。正常任务默认采用 `auto`，执行成功后进入
+`done`。选择 `manual` 时，成功后才进入 `in_review`。
 
-   ```text
-   [@Worker](mention://agent/worker)
-   ```
+Squad 执行顺序如下：
 
-5. 程序启动被选择的成员，并把 stdout、stderr 合并保存为评论和运行记录。
-6. 成员返回后，程序重新唤醒 leader。
-7. Leader 不再派发成员时，任务进入 `in_review`，等待人工标记为 `done`。
+1. Leader 读取 Issue、历史评论、成员角色和 skill 摘要。
+2. Leader 用 `[@名称](mention://agent/ID)` 指定花名册中的 Worker。
+3. 程序按 mention 顺序串行执行本轮 Worker。
+4. Worker 输出成为同一 Issue 的评论和 Run 记录。
+5. 程序重新唤醒 Leader；Leader 可以继续派发。
+6. Leader 不再产生有效 mention 时，其回复成为最终结论。
 
-直接分配给单个智能体的任务在执行成功后进入 `in_review`。执行失败会保存失败记录，
-任务回到 `todo`。
+首版采用稳定的串行调度。每个 Issue 设有最大 Run 数，避免 Agent 反复 mention 形成死循环。
 
 ## 架构
 
 ```mermaid
 flowchart LR
-    Browser[本地浏览器] -->|HTTP / JSON| Core[静态 multica-core 二进制]
+    Browser[本地浏览器] -->|HTTP / JSON| Core[静态 multica-core]
     CLI[命令行] --> Core
-    Core --> Store[(本地 JSON 文件)]
-    Core --> Leader[Leader CLI]
-    Core --> Worker[Worker CLI]
-    Leader -->|mention 派发| Core
-    Worker -->|结果写回| Core
+    Core --> Store[(本地 JSON)]
+    Core --> Adapter[通用 argv Adapter]
+    Adapter --> Leader[Leader CLI]
+    Adapter --> Worker[Worker CLI]
+    Leader -->|mention| Core
+    Worker -->|结果| Core
 ```
 
-服务固定监听 `127.0.0.1`。Web 页面不加载 CDN、字体、脚本或其他在线资源。
+服务固定监听 `127.0.0.1`。Web 页面不加载 CDN、在线字体或外部脚本。
 
-## 数据目录
+## 数据模型和恢复
 
 ```text
 <data-dir>/
+├── meta.json
+├── sequence.json
 ├── agents/<agent-id>.json
 ├── squads/<squad-id>.json
 ├── issues/<issue-id>.json
 ├── runs/<run-id>.json
-└── sequence.json
+└── backups/*.json
 ```
 
-实体以临时文件加原子替换的方式写入。HTTP 服务内的写操作串行执行，读取请求可以在
-智能体运行期间继续查看 `in_progress` 和 `running` 状态。
+实体使用同目录临时文件加原子替换写入。`meta.json` 保存 schema version，启动时自动迁移
+旧数据。服务启动时会把遗留的 `running` Run，以及 `queued`、`in_progress` Issue 标记
+为失败并写入原因，使异常退出后的状态可以诊断和重新运行。
 
-这是单进程、单机设计。不要让两个 `multica-core` 进程同时写同一个数据目录。
+同一进程内的写操作串行执行，读请求可以在 Agent 运行期间读取文件状态。一个 Issue
+执行期间，其他写请求会等待其结束；取消请求通过独立的进程状态表生效。不要让两个
+服务进程同时写同一个数据目录。
 
-## 智能体命令
+数据导入会先在 `<data-dir>/backups/` 写入当前数据的完整快照。运行中有任务时拒绝导入。
 
-智能体命令保存为 argv 数组，通过 `fork` 和 `execvp` 直接启动，不经过 shell。
-以下占位符会在执行前替换：
+## Agent Adapter
+
+Agent 命令保存为字符串数组，通过 `fork` 和 `execvp` 直接启动，不经过 shell。支持：
 
 | 占位符 | 内容 |
 | --- | --- |
-| `{prompt}` | 任务、历史评论、职责、小队花名册和 skill 内容组成的完整提示 |
-| `{cwd}` | 任务的工作目录 |
-| `{issue_id}` | 当前任务 ID |
-| `{agent_id}` | 当前智能体 ID |
+| `{prompt}` | 任务、评论、职责、小队花名册和 skill 文件内容组成的完整提示 |
+| `{cwd}` | Issue 工作目录 |
+| `{issue_id}` | 当前 Issue ID |
+| `{agent_id}` | 当前 Agent ID |
 
-命令没有包含 `{prompt}` 时，程序会把提示作为最后一个参数追加。每次运行最多捕获
-4 MiB 输出。
+若 argv 没有 `{prompt}`，提示会自动追加到末尾。每次调用保存实际展开后的命令摘要和提示
+快照。Agent 的 stdout 与 stderr 合并捕获，最多保存 4 MiB。
 
-## Web 和 API
+每个 Issue 可以配置 1 至 86400 秒超时以及 0 至 10 次失败重试。子进程在独立进程组中
+运行；超时或取消时先发送 `SIGTERM`，两秒后仍未退出则发送 `SIGKILL`，以清理 Agent
+产生的子进程。每次尝试都有独立 Run。
 
-运行：
+## Issue 状态
 
-```sh
-./start.sh
+```mermaid
+flowchart LR
+    Todo[todo] --> Queue[queued]
+    Queue --> Running[in_progress]
+    Running -->|失败| Failed[failed]
+    Running -->|取消| Cancelled[cancelled]
+    Failed -->|重新运行| Queue
+    Cancelled -->|重新运行| Queue
+    Running -->|成功 + auto| Done[done]
+    Running -->|成功 + manual| Review[in_review]
+    Review -->|验收| Done
+    Review -->|重新运行| Queue
 ```
 
-然后访问 `http://127.0.0.1:30420`。页面支持：
+`POST /run` 只负责校验、落盘为 `queued` 并返回 HTTP 202。执行发生在服务后台，浏览器
+轮询状态，不需要保持长连接。失败原因保存在 Issue 的 `last_error` 和对应 Run 中。
 
-- 登记智能体和 skill，点击智能体卡片查看及编辑配置；
-- 创建小队、选择 leader、添加成员；
-- 创建、筛选和查看任务；
-- 启动智能体协作；
-- 查看评论时间线和运行记录；
-- 手动修改任务状态。
-- 在亮色、暗色和跟随系统三种界面主题之间切换。
+## Web 能力
 
-界面主题属于本应用的本地显示偏好，保存在浏览器 `localStorage` 中，不会进入任务
-提示或写入任何 skill。
+- Agent：创建、详情、编辑、启停、连接测试和引用保护删除；
+- Squad：创建、详情、Leader 与成员完整编辑、成员职责和引用保护删除；
+- Issue：创建、搜索、详情、编辑、复制、评论、运行、取消、状态修改和删除；
+- Run：状态、触发原因、退出码、失败原因、输出、命令和提示快照；
+- 数据：数据目录显示、导出和导入；
+- 设置：亮色、暗色、跟随系统。
 
-页面调用以下 API：
+修改 Agent 后应先保存，再执行连接测试，因为测试使用服务端已保存的命令。创建 Issue
+时只显示当前可运行的 Agent 和 Squad；停用 Agent、空 Squad 或停用成员会在界面显示
+原因。
+
+## HTTP API
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查和版本 |
-| GET | `/api/state` | 获取全部本地状态 |
-| POST | `/api/agents` | 登记智能体 |
-| GET | `/api/agents/:id` | 获取单个智能体配置 |
-| PUT | `/api/agents/:id` | 编辑智能体名称、职责、命令和 skill |
-| POST | `/api/squads` | 创建小队 |
-| POST | `/api/squads/:id/members` | 添加小队成员 |
-| POST | `/api/issues` | 创建任务 |
-| GET | `/api/issues/:id` | 获取任务、评论和运行 |
-| POST | `/api/issues/:id/run` | 执行任务 |
-| POST | `/api/issues/:id/status` | 修改任务状态 |
+| GET | `/api/state` | Agent、Squad、Issue、Run 和数据目录 |
+| GET | `/api/export` | 下载完整数据 JSON |
+| POST | `/api/import` | 备份后导入完整数据 JSON |
+| POST | `/api/agents` | 创建 Agent |
+| GET | `/api/agents/:id` | 查看 Agent |
+| PUT | `/api/agents/:id` | 编辑 Agent |
+| DELETE | `/api/agents/:id` | 安全删除 Agent |
+| POST | `/api/agents/:id/test` | 测试已保存的 Agent 配置 |
+| POST | `/api/squads` | 创建 Squad |
+| GET | `/api/squads/:id` | 查看 Squad |
+| PUT | `/api/squads/:id` | 完整编辑 Squad |
+| DELETE | `/api/squads/:id` | 安全删除 Squad |
+| POST | `/api/squads/:id/members` | 追加成员 |
+| POST | `/api/issues` | 创建 Issue |
+| GET | `/api/issues/:id` | 查看 Issue、评论和 Run |
+| PUT | `/api/issues/:id` | 编辑 Issue |
+| DELETE | `/api/issues/:id` | 删除 Issue 及其 Run |
+| POST | `/api/issues/:id/comments` | 添加人工评论 |
+| POST | `/api/issues/:id/status` | 修改状态 |
+| POST | `/api/issues/:id/run` | 排队运行，返回 HTTP 202 |
+| POST | `/api/issues/:id/cancel` | 取消正在运行的 Issue |
 
-`run` API 是同步请求，连接会保持到本轮协作完成。浏览器会在等待期间继续刷新状态。
+API 错误返回 JSON：`{"error":"具体原因"}`。这是仅监听本机的单用户 API，没有鉴权，
+不应暴露到公网。
 
-## 离线包与安装
+## 离线交付
 
-发行包解压后无需安装：
-
-```sh
-tar -xzf multica-core-offline-0.1.0-linux-x86_64.tar.gz
-cd multica-core-offline-0.1.0-linux-x86_64
-./start.sh
-```
-
-`start.sh` 默认把数据写入解压目录的 `data/`，也可以覆盖：
-
-```sh
-./start.sh --data-dir /srv/multica-mini/data --port 30420
-```
-
-安装到用户目录：
-
-```sh
-./install.sh --prefix "$HOME/.local" --data-dir "$HOME/.local/share/multica-core"
-"$HOME/.local/bin/multica-core" serve
-```
-
-## 构建与验证
-
-仓库包含 cpp-httplib 和 nlohmann/json 源码。构建脚本优先使用仓库内或相邻目录中的
-musl 交叉工具链，也接受环境变量 `CXX` 和 `STRIP`。没有 musl 工具链时会回退到
-系统 C++17 编译器并继续尝试全静态链接。
+正式二进制使用 musl 全静态构建，目标为 CentOS 7、RHEL 8 及兼容的 x86_64 Linux。
+包内包含二进制、Web 资源、文档、启动/服务/安装/卸载脚本、许可证以及逐文件和压缩包
+SHA-256。
 
 ```sh
 ./scripts/build.sh
 ./tests/smoke.sh
 ./tests/web-smoke.sh
+./tests/reliability-smoke.sh
 ./scripts/package.sh
 ```
 
-正式离线二进制使用 musl 构建。验证结果为：
+验证包括 CLI 协作闭环、HTTP CRUD、自动和人工完成、失败重试、超时、取消、导入导出、
+异常退出恢复、解压运行、安装、后台服务以及默认保留数据的卸载。
 
-- ELF 64-bit x86-64；
-- static PIE；
-- `ldd` 输出 `statically linked`；
-- ELF 动态段没有 `NEEDED` 项；
-- CLI leader → worker → leader 闭环通过；
-- Web 静态资源和全部 JSON API 闭环通过；
-- 解压直接运行和安装后运行通过。
-
-当前压缩包约 832 KiB，二进制约 2.1 MiB。运行程序本身不需要 glibc、Node.js、
-Python、Go、Docker 或数据库。实际处理任务仍需要相应的智能体 CLI 及其依赖。
-
-## 与完整 Multica 的区别
-
-裁剪版没有账号、工作区、权限、通知、Chat、Inbox、Autopilot、Project、外部集成、
-插件、远程 daemon、对象存储和 26 个 provider 适配层。它使用通用 argv 适配器，并将
-状态保存在本机文件中。
-
-完整 Multica 适合多用户服务和完整产品体验；本项目专注于老系统上的单机离线协作。
+Multica Mini 本体不需要宿主机 glibc、Node.js、Python、Go、Docker 或数据库。被调用的
+Agent CLI 可能有自己的运行库、模型账号或网络要求，这些不由本包提供。
 
 ## 许可证
 
-本项目基于 [Multica](https://github.com/multica-ai/multica)，分发时携带完整
-`LICENSE` 和 `NOTICE`。Multica License 包含对第三方托管服务和嵌入商业产品的
-附加限制。仓库和离线包同时携带 cpp-httplib、nlohmann/json 的第三方许可证说明。
+本项目基于 [Multica](https://github.com/multica-ai/multica)，分发时携带完整 `LICENSE`
+和 `NOTICE`。仓库和离线包同时携带 cpp-httplib、nlohmann/json 的第三方许可证说明。

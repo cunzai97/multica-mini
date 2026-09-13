@@ -15,18 +15,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Verify scripts and frontend
         run: |
-          sh -n start.sh install.sh scripts/build.sh scripts/package.sh tests/smoke.sh tests/web-smoke.sh
+          sh -n start.sh service.sh install.sh uninstall.sh scripts/build.sh scripts/package.sh tests/fake-agent.sh tests/smoke.sh tests/web-smoke.sh tests/reliability-smoke.sh
           node --check web/app.js
       - name: Verify static binary
         run: |
           file bin/multica-core | grep -E 'ELF 64-bit.*x86-64.*static-pie linked'
           ! readelf -d bin/multica-core | grep NEEDED
-      - name: Run collaboration smoke tests
+      - name: Run collaboration and reliability smoke tests
         run: |
-          chmod +x bin/multica-core tests/fake-agent.sh tests/smoke.sh tests/web-smoke.sh
+          chmod +x bin/multica-core tests/fake-agent.sh tests/smoke.sh tests/web-smoke.sh tests/reliability-smoke.sh
           ./tests/smoke.sh
           ./tests/web-smoke.sh
+          ./tests/reliability-smoke.sh
       - name: Verify offline archive
         run: |
           cd dist
-          sha256sum -c multica-core-offline-0.1.0-linux-x86_64.tar.gz.sha256
+          sha256sum -c multica-core-offline-0.2.0-linux-x86_64.tar.gz.sha256

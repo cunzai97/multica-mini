@@ -6,18 +6,23 @@
 #include <ctime>
 #include <cstring>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <optional>
+#include <poll.h>
 #include <queue>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sys/prctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -29,19 +34,54 @@ using json = nlohmann::json;
 
 namespace {
 
-constexpr const char *kVersion = "0.1.0";
+constexpr const char *kVersion = "0.2.0";
 constexpr std::size_t kMaxCapturedOutput = 4U * 1024U * 1024U;
 std::mutex g_write_mutex;
+std::mutex g_process_mutex;
+std::map<std::string, pid_t> g_active_processes;
+std::set<std::string> g_cancelled_issues;
+std::set<std::string> g_active_issues;
 
 struct ProcessResult {
     int exit_code = 127;
     std::string output;
+    bool cancelled = false;
+    bool timed_out = false;
 };
 
 struct Dispatch {
     std::string agent_id;
     std::string reason;
 };
+
+bool cancellation_requested(const std::string &issue_id) {
+    std::lock_guard<std::mutex> lock(g_process_mutex);
+    return g_cancelled_issues.count(issue_id) > 0;
+}
+
+bool request_cancellation(const std::string &issue_id) {
+    std::lock_guard<std::mutex> lock(g_process_mutex);
+    const bool active_issue = g_active_issues.count(issue_id) > 0;
+    g_cancelled_issues.insert(issue_id);
+    const auto active = g_active_processes.find(issue_id);
+    if (active != g_active_processes.end()) ::kill(-active->second, SIGTERM);
+    return active_issue;
+}
+
+bool begin_issue_run(const std::string &issue_id) {
+    std::lock_guard<std::mutex> lock(g_process_mutex);
+    if (g_active_issues.count(issue_id)) return false;
+    g_active_issues.insert(issue_id);
+    g_cancelled_issues.erase(issue_id);
+    return true;
+}
+
+void finish_issue_run(const std::string &issue_id) {
+    std::lock_guard<std::mutex> lock(g_process_mutex);
+    g_active_issues.erase(issue_id);
+    g_active_processes.erase(issue_id);
+    g_cancelled_issues.erase(issue_id);
+}
 
 std::string trim(std::string value) {
     const auto first = value.find_first_not_of(" \t\r\n");
@@ -168,6 +208,25 @@ void save_entity(const fs::path &home, const std::string &kind, const std::strin
     write_json(entity_path(home, kind, id), value);
 }
 
+void validate_assignee_ready(const fs::path &home, const std::string &type, const std::string &id) {
+    if (type == "agent") {
+        const json agent = load_entity(home, "agents", id);
+        if (!agent.value("enabled", true)) throw std::runtime_error("agent is disabled: " + id);
+        return;
+    }
+    const json squad = load_entity(home, "squads", id);
+    const auto members = squad.value("members", json::array());
+    if (members.empty()) throw std::runtime_error("squad has no worker members: " + id);
+    const std::string leader_id = squad.value("leader_id", "");
+    const json leader = load_entity(home, "agents", leader_id);
+    if (!leader.value("enabled", true)) throw std::runtime_error("squad leader is disabled: " + leader_id);
+    for (const auto &member : members) {
+        const std::string member_id = member.value("agent_id", "");
+        const json agent = load_entity(home, "agents", member_id);
+        if (!agent.value("enabled", true)) throw std::runtime_error("squad member is disabled: " + member_id);
+    }
+}
+
 std::string replace_all(std::string value, const std::string &needle, const std::string &replacement) {
     if (needle.empty()) return value;
     std::size_t position = 0;
@@ -205,7 +264,8 @@ ProcessResult run_process(const std::vector<std::string> &command,
                           const fs::path &cwd,
                           const fs::path &home,
                           const std::string &issue_id,
-                          const std::string &agent_id) {
+                          const std::string &agent_id,
+                          int timeout_seconds) {
     if (command.empty()) throw std::runtime_error("empty command");
     int output_pipe[2];
     if (::pipe(output_pipe) != 0) throw std::runtime_error("pipe failed: " + std::string(std::strerror(errno)));
@@ -217,6 +277,9 @@ ProcessResult run_process(const std::vector<std::string> &command,
         throw std::runtime_error("fork failed: " + std::string(std::strerror(errno)));
     }
     if (pid == 0) {
+        ::setpgid(0, 0);
+        ::prctl(PR_SET_PDEATHSIG, SIGTERM);
+        if (::getppid() == 1) _exit(125);
         ::close(output_pipe[0]);
         ::dup2(output_pipe[1], STDOUT_FILENO);
         ::dup2(output_pipe[1], STDERR_FILENO);
@@ -239,8 +302,66 @@ ProcessResult run_process(const std::vector<std::string> &command,
     }
 
     ::close(output_pipe[1]);
+    ::setpgid(pid, pid);
+    const int flags = ::fcntl(output_pipe[0], F_GETFL, 0);
+    if (flags >= 0) ::fcntl(output_pipe[0], F_SETFL, flags | O_NONBLOCK);
+    {
+        std::lock_guard<std::mutex> lock(g_process_mutex);
+        g_active_processes[issue_id] = pid;
+    }
+
     std::string output;
     char buffer[8192];
+    int status = 0;
+    bool child_done = false;
+    bool sent_term = false;
+    ProcessResult result;
+    const auto started = std::chrono::steady_clock::now();
+    auto term_sent_at = started;
+
+    while (!child_done) {
+        struct pollfd descriptor { output_pipe[0], POLLIN | POLLHUP, 0 };
+        const int poll_result = ::poll(&descriptor, 1, 100);
+        if (poll_result < 0 && errno != EINTR) {
+            ::kill(-pid, SIGKILL);
+            throw std::runtime_error("poll failed: " + std::string(std::strerror(errno)));
+        }
+        if (poll_result > 0 && (descriptor.revents & (POLLIN | POLLHUP))) {
+            while (true) {
+                const ssize_t size = ::read(output_pipe[0], buffer, sizeof(buffer));
+                if (size > 0) {
+                    const std::size_t remaining = kMaxCapturedOutput > output.size()
+                                                      ? kMaxCapturedOutput - output.size()
+                                                      : 0;
+                    output.append(buffer, std::min<std::size_t>(remaining, static_cast<std::size_t>(size)));
+                    continue;
+                }
+                if (size < 0 && errno == EINTR) continue;
+                break;
+            }
+        }
+
+        const pid_t waited = ::waitpid(pid, &status, WNOHANG);
+        if (waited == pid) child_done = true;
+        else if (waited < 0 && errno != EINTR) throw std::runtime_error("waitpid failed: " + std::string(std::strerror(errno)));
+
+        const auto current = std::chrono::steady_clock::now();
+        const bool cancelled = cancellation_requested(issue_id);
+        if (!sent_term && cancelled) {
+            result.cancelled = true;
+            ::kill(-pid, SIGTERM);
+            sent_term = true;
+            term_sent_at = current;
+        } else if (!sent_term && current - started >= std::chrono::seconds(timeout_seconds)) {
+            result.timed_out = true;
+            ::kill(-pid, SIGTERM);
+            sent_term = true;
+            term_sent_at = current;
+        } else if (sent_term && !child_done && current - term_sent_at >= std::chrono::seconds(2)) {
+            ::kill(-pid, SIGKILL);
+        }
+    }
+
     while (true) {
         const ssize_t size = ::read(output_pipe[0], buffer, sizeof(buffer));
         if (size > 0) {
@@ -254,12 +375,10 @@ ProcessResult run_process(const std::vector<std::string> &command,
         break;
     }
     ::close(output_pipe[0]);
-
-    int status = 0;
-    while (::waitpid(pid, &status, 0) < 0) {
-        if (errno != EINTR) throw std::runtime_error("waitpid failed: " + std::string(std::strerror(errno)));
+    {
+        std::lock_guard<std::mutex> lock(g_process_mutex);
+        g_active_processes.erase(issue_id);
     }
-    ProcessResult result;
     result.output = trim(output);
     if (WIFEXITED(status)) result.exit_code = WEXITSTATUS(status);
     else if (WIFSIGNALED(status)) result.exit_code = 128 + WTERMSIG(status);
@@ -387,6 +506,7 @@ ProcessResult execute_agent(const fs::path &home,
                             bool is_leader,
                             const std::string &reason) {
     const json agent = load_entity(home, "agents", agent_id);
+    if (!agent.value("enabled", true)) throw std::runtime_error("agent is disabled: " + agent_id);
     const std::string run_id = next_id(home, "run", "run-");
     json run{
         {"id", run_id},
@@ -404,17 +524,25 @@ ProcessResult execute_agent(const fs::path &home,
         const std::vector<std::string> command = agent_command(agent, issue, prompt);
         fs::path cwd = issue.value("cwd", fs::current_path().string());
         if (!fs::is_directory(cwd)) throw std::runtime_error("issue cwd is not a directory: " + cwd.string());
+        run["prompt"] = prompt;
+        run["command"] = agent.value("command", json::array());
+        save_entity(home, "runs", run_id, run);
 
-        const ProcessResult result = run_process(command, cwd, home, issue.value("id", ""), agent_id);
-        run["status"] = result.exit_code == 0 ? "completed" : "failed";
+        const ProcessResult result = run_process(command, cwd, home, issue.value("id", ""), agent_id,
+                                                 issue.value("timeout_seconds", 900));
+        run["status"] = result.cancelled ? "cancelled" : (result.exit_code == 0 ? "completed" : "failed");
         run["exit_code"] = result.exit_code;
         run["output"] = result.output;
+        if (result.timed_out) run["failure_reason"] = "timeout";
+        if (result.cancelled) run["failure_reason"] = "cancelled";
         run["finished_at"] = now_utc();
         save_entity(home, "runs", run_id, run);
 
-        const std::string comment = result.output.empty()
-                                        ? "Agent process exited with code " + std::to_string(result.exit_code) + " without output."
-                                        : result.output;
+        std::string comment = result.output;
+        if (result.cancelled) comment = "Agent run was cancelled." + (comment.empty() ? "" : "\n\n" + comment);
+        else if (result.timed_out) comment = "Agent run timed out after " + std::to_string(issue.value("timeout_seconds", 900)) +
+                                             " seconds." + (comment.empty() ? "" : "\n\n" + comment);
+        else if (comment.empty()) comment = "Agent process exited with code " + std::to_string(result.exit_code) + " without output.";
         append_comment(home, issue, agent, comment);
         save_entity(home, "issues", issue.value("id", ""), issue);
         std::cout << "[" << agent.value("name", agent_id) << "] " << comment << "\n";
@@ -433,6 +561,24 @@ ProcessResult execute_agent(const fs::path &home,
     }
 }
 
+ProcessResult execute_with_retries(const fs::path &home,
+                                   json &issue,
+                                   const std::string &agent_id,
+                                   const std::optional<json> &squad,
+                                   bool is_leader,
+                                   const std::string &reason) {
+    const int max_retries = issue.value("max_retries", 0);
+    ProcessResult result;
+    for (int attempt = 0; attempt <= max_retries; ++attempt) {
+        const std::string trigger = attempt == 0
+                                        ? reason
+                                        : "retry " + std::to_string(attempt) + " after failed run";
+        result = execute_agent(home, issue, agent_id, squad, is_leader, trigger);
+        if (result.exit_code == 0 || result.cancelled) return result;
+    }
+    return result;
+}
+
 bool pending_contains(std::queue<Dispatch> pending, const std::string &agent_id) {
     while (!pending.empty()) {
         if (pending.front().agent_id == agent_id) return true;
@@ -445,12 +591,20 @@ void enqueue_unique(std::queue<Dispatch> &pending, const Dispatch &dispatch) {
     if (!pending_contains(pending, dispatch.agent_id)) pending.push(dispatch);
 }
 
+std::string review_policy(const json &value, const std::string &fallback = "auto");
+
 int run_direct_issue(const fs::path &home, json &issue, const std::string &agent_id) {
     issue["status"] = "in_progress";
+    issue.erase("last_error");
     issue["updated_at"] = now_utc();
     save_entity(home, "issues", issue.value("id", ""), issue);
-    const ProcessResult result = execute_agent(home, issue, agent_id, std::nullopt, false, "issue assignment");
-    issue["status"] = result.exit_code == 0 ? "in_review" : "todo";
+    const ProcessResult result = execute_with_retries(home, issue, agent_id, std::nullopt, false, "issue assignment");
+    issue["status"] = result.cancelled
+                          ? "cancelled"
+                          : (result.exit_code == 0
+                                 ? (review_policy(issue) == "manual" ? "in_review" : "done")
+                                 : "failed");
+    if (result.cancelled) issue["last_error"] = "run cancelled by user";
     issue["updated_at"] = now_utc();
     save_entity(home, "issues", issue.value("id", ""), issue);
     return result.exit_code == 0 ? 0 : 1;
@@ -469,6 +623,7 @@ int run_squad_issue(const fs::path &home, json &issue, const std::string &squad_
     if (members.empty()) throw std::runtime_error("squad has no worker members: " + squad_id);
 
     issue["status"] = "in_progress";
+    issue.erase("last_error");
     issue["updated_at"] = now_utc();
     save_entity(home, "issues", issue.value("id", ""), issue);
 
@@ -480,9 +635,10 @@ int run_squad_issue(const fs::path &home, json &issue, const std::string &squad_
         const Dispatch dispatch = pending.front();
         pending.pop();
         const bool is_leader = dispatch.agent_id == leader_id;
-        const ProcessResult result = execute_agent(home, issue, dispatch.agent_id, squad, is_leader, dispatch.reason);
+        const ProcessResult result = execute_with_retries(home, issue, dispatch.agent_id, squad, is_leader, dispatch.reason);
         if (result.exit_code != 0) {
-            issue["status"] = "todo";
+            issue["status"] = result.cancelled ? "cancelled" : "failed";
+            issue["last_error"] = result.cancelled ? "run cancelled by user" : "agent run failed: " + dispatch.agent_id;
             issue["updated_at"] = now_utc();
             save_entity(home, "issues", issue.value("id", ""), issue);
             return 1;
@@ -498,13 +654,14 @@ int run_squad_issue(const fs::path &home, json &issue, const std::string &squad_
             }
             if (accepted == 0) {
                 if (!leader_delegated) {
-                    issue["status"] = "todo";
+                    issue["status"] = "failed";
+                    issue["last_error"] = "leader did not delegate to a squad member";
                     issue["updated_at"] = now_utc();
                     save_entity(home, "issues", issue.value("id", ""), issue);
                     std::cerr << "leader did not delegate to a squad member\n";
                     return 1;
                 }
-                issue["status"] = "in_review";
+                issue["status"] = review_policy(issue) == "manual" ? "in_review" : "done";
                 issue["updated_at"] = now_utc();
                 save_entity(home, "issues", issue.value("id", ""), issue);
                 return 0;
@@ -520,7 +677,8 @@ int run_squad_issue(const fs::path &home, json &issue, const std::string &squad_
         }
     }
 
-    issue["status"] = "todo";
+    issue["status"] = "failed";
+    issue["last_error"] = "squad run limit reached before completion";
     issue["updated_at"] = now_utc();
     save_entity(home, "issues", issue.value("id", ""), issue);
     std::cerr << "squad run limit reached before review\n";
@@ -570,11 +728,13 @@ void print_help() {
         "  multica-core squad create ID --name NAME --leader AGENT_ID\n"
         "  multica-core squad member-add SQUAD_ID AGENT_ID [--role TEXT]\n"
         "  multica-core squad show ID\n"
-        "  multica-core issue create --title TEXT --description TEXT --assignee agent:ID|squad:ID [--cwd DIR]\n"
+        "  multica-core issue create --title TEXT --description TEXT --assignee agent:ID|squad:ID [--cwd DIR] [--review-policy auto|manual] [--timeout-seconds N] [--max-retries N]\n"
         "  multica-core issue list\n"
         "  multica-core issue show ID\n"
         "  multica-core issue status ID STATUS\n"
         "  multica-core run ISSUE_ID [--max-runs N]\n"
+        "  multica-core data export FILE\n"
+        "  multica-core data import FILE\n"
         "  multica-core serve [--port 30420] [--web-root DIR]\n"
         "  multica-core version\n\n"
         "Global option --data-dir DIR may appear anywhere.\n";
@@ -614,6 +774,7 @@ int command_agent(const fs::path &home, const std::vector<std::string> &args) {
         {"role", option_value(args, "--role", 4).value_or("")},
         {"command", command},
         {"skills", skills},
+        {"enabled", true},
         {"created_at", now_utc()},
     };
     save_entity(home, "agents", id, agent);
@@ -670,7 +831,7 @@ int command_issue(const fs::path &home, const std::vector<std::string> &args) {
         return 0;
     }
     if (args.size() >= 5 && args[1] == "issue" && args[2] == "status") {
-        static const std::set<std::string> allowed{"todo", "in_progress", "in_review", "done"};
+        static const std::set<std::string> allowed{"todo", "queued", "in_progress", "in_review", "done", "failed", "cancelled"};
         if (!allowed.count(args[4])) throw std::runtime_error("invalid issue status: " + args[4]);
         json issue = load_entity(home, "issues", args[3]);
         issue["status"] = args[4];
@@ -685,11 +846,15 @@ int command_issue(const fs::path &home, const std::vector<std::string> &args) {
         const std::string type = assignee.substr(0, separator);
         const std::string id = assignee.substr(separator + 1);
         if (type != "agent" && type != "squad") throw std::runtime_error("assignee type must be agent or squad");
-        load_entity(home, type == "agent" ? "agents" : "squads", id);
+        validate_assignee_ready(home, type, id);
         const std::string issue_id = next_id(home, "issue", "issue-");
         fs::path cwd = option_value(args, "--cwd", 3).value_or(fs::current_path().string());
         cwd = fs::absolute(cwd);
         if (!fs::is_directory(cwd)) throw std::runtime_error("cwd is not a directory: " + cwd.string());
+        const int timeout_seconds = std::stoi(option_value(args, "--timeout-seconds", 3).value_or("900"));
+        const int max_retries = std::stoi(option_value(args, "--max-retries", 3).value_or("0"));
+        if (timeout_seconds < 1 || timeout_seconds > 86400) throw std::runtime_error("--timeout-seconds must be between 1 and 86400");
+        if (max_retries < 0 || max_retries > 10) throw std::runtime_error("--max-retries must be between 0 and 10");
         const json issue{
             {"id", issue_id},
             {"title", required_option(args, "--title", 3)},
@@ -698,6 +863,9 @@ int command_issue(const fs::path &home, const std::vector<std::string> &args) {
             {"assignee_type", type},
             {"assignee_id", id},
             {"cwd", cwd.string()},
+            {"review_policy", review_policy(json{{"review_policy", option_value(args, "--review-policy", 3).value_or("auto")}})},
+            {"timeout_seconds", timeout_seconds},
+            {"max_retries", max_retries},
             {"comments", json::array()},
             {"created_at", now_utc()},
             {"updated_at", now_utc()},
@@ -742,6 +910,115 @@ json string_array(const json &value, const std::string &key) {
         result.push_back(entry.get<std::string>());
     }
     return result;
+}
+
+bool optional_bool(const json &value, const std::string &key, bool fallback) {
+    if (!value.contains(key) || value[key].is_null()) return fallback;
+    if (!value[key].is_boolean()) throw std::runtime_error(key + " must be a boolean");
+    return value[key].get<bool>();
+}
+
+int optional_integer(const json &value, const std::string &key, int fallback, int minimum, int maximum) {
+    if (!value.contains(key) || value[key].is_null()) return fallback;
+    if (!value[key].is_number_integer()) throw std::runtime_error(key + " must be an integer");
+    const int result = value[key].get<int>();
+    if (result < minimum || result > maximum) {
+        throw std::runtime_error(key + " must be between " + std::to_string(minimum) + " and " + std::to_string(maximum));
+    }
+    return result;
+}
+
+std::string review_policy(const json &value, const std::string &fallback) {
+    const std::string policy = optional_string(value, "review_policy", fallback);
+    if (policy != "auto" && policy != "manual") {
+        throw std::runtime_error("review_policy must be auto or manual");
+    }
+    return policy;
+}
+
+void migrate_data(const fs::path &home) {
+    const fs::path metadata_path = home / "meta.json";
+    int schema_version = 0;
+    if (fs::exists(metadata_path)) schema_version = read_json(metadata_path).value("schema_version", 0);
+    if (schema_version >= 2) return;
+
+    for (auto agent : load_entities(home, "agents")) {
+        if (!agent.contains("enabled")) agent["enabled"] = true;
+        save_entity(home, "agents", agent.value("id", ""), agent);
+    }
+    for (auto issue : load_entities(home, "issues")) {
+        if (!issue.contains("review_policy")) issue["review_policy"] = "auto";
+        if (!issue.contains("timeout_seconds")) issue["timeout_seconds"] = 900;
+        if (!issue.contains("max_retries")) issue["max_retries"] = 0;
+        save_entity(home, "issues", issue.value("id", ""), issue);
+    }
+    write_json(metadata_path, json{{"schema_version", 2}, {"updated_at", now_utc()}});
+}
+
+void recover_interrupted_runs(const fs::path &home) {
+    for (auto run : load_entities(home, "runs")) {
+        if (run.value("status", "") != "running") continue;
+        run["status"] = "failed";
+        run["failure_reason"] = "service_restarted";
+        run["finished_at"] = now_utc();
+        save_entity(home, "runs", run.value("id", ""), run);
+    }
+    for (auto issue : load_entities(home, "issues")) {
+        const std::string status = issue.value("status", "todo");
+        if (status != "queued" && status != "in_progress") continue;
+        issue["status"] = "failed";
+        issue["last_error"] = "service restarted while the task was running";
+        issue["updated_at"] = now_utc();
+        save_entity(home, "issues", issue.value("id", ""), issue);
+    }
+}
+
+json export_bundle(const fs::path &home) {
+    return json{
+        {"format", "multica-mini-backup"},
+        {"format_version", 1},
+        {"exported_at", now_utc()},
+        {"agents", load_entities(home, "agents")},
+        {"squads", load_entities(home, "squads")},
+        {"issues", load_entities(home, "issues")},
+        {"runs", load_entities(home, "runs")},
+        {"sequence", read_json(home / "sequence.json")},
+    };
+}
+
+void import_bundle(const fs::path &home, const json &bundle) {
+    if (bundle.value("format", "") != "multica-mini-backup" || bundle.value("format_version", 0) != 1) {
+        throw std::runtime_error("unsupported backup format");
+    }
+    static const std::vector<std::string> kinds{"agents", "squads", "issues", "runs"};
+    for (const auto &kind : kinds) {
+        if (!bundle.contains(kind) || !bundle[kind].is_array()) throw std::runtime_error(kind + " must be an array");
+        for (const auto &entry : bundle[kind]) {
+            if (!entry.is_object()) throw std::runtime_error(kind + " entries must be objects");
+            entity_path(home, kind, required_string(entry, "id"));
+        }
+    }
+    if (!bundle.contains("sequence") || !bundle["sequence"].is_object()) {
+        throw std::runtime_error("sequence must be an object");
+    }
+
+    const fs::path backup_dir = home / "backups";
+    fs::create_directories(backup_dir);
+    std::string backup_name = now_utc();
+    std::replace(backup_name.begin(), backup_name.end(), ':', '-');
+    write_json(backup_dir / ("before-import-" + backup_name + ".json"), export_bundle(home));
+
+    for (const auto &kind : kinds) {
+        for (const auto &entry : fs::directory_iterator(home / kind)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".json") fs::remove(entry.path());
+        }
+        for (const auto &value : bundle[kind]) {
+            save_entity(home, kind, value.value("id", ""), value);
+        }
+    }
+    write_json(home / "sequence.json", bundle["sequence"]);
+    write_json(home / "meta.json", json{{"schema_version", 1}, {"imported_at", now_utc()}});
+    migrate_data(home);
 }
 
 void json_response(httplib::Response &response, const json &value, int status = 200) {
@@ -790,12 +1067,14 @@ fs::path find_web_root(const std::vector<std::string> &args) {
 
 int run_issue(const fs::path &home, json &issue, int max_runs) {
     const std::string type = issue.value("assignee_type", "");
+    validate_assignee_ready(home, type, issue.value("assignee_id", ""));
     if (type == "agent") return run_direct_issue(home, issue, issue.value("assignee_id", ""));
     if (type == "squad") return run_squad_issue(home, issue, issue.value("assignee_id", ""), max_runs);
     throw std::runtime_error("issue has invalid assignee_type");
 }
 
 int serve_web(const fs::path &home, const std::vector<std::string> &args) {
+    recover_interrupted_runs(home);
     const std::string port_text = option_value(args, "--port", 1).value_or("30420");
     std::size_t parsed = 0;
     const int port = std::stoi(port_text, &parsed);
@@ -813,11 +1092,34 @@ int serve_web(const fs::path &home, const std::vector<std::string> &args) {
         api_guard(response, [&] {
             json_response(response, json{
                 {"version", kVersion},
+                {"data_dir", fs::absolute(home).string()},
                 {"agents", load_entities(home, "agents")},
                 {"squads", load_entities(home, "squads")},
                 {"issues", load_entities(home, "issues")},
                 {"runs", load_entities(home, "runs")},
             });
+        });
+    });
+
+    server.Get("/api/export", [home](const httplib::Request &, httplib::Response &response) {
+        api_guard(response, [&] {
+            response.status = 200;
+            response.set_header("Cache-Control", "no-store");
+            response.set_header("Content-Disposition", "attachment; filename=multica-mini-backup.json");
+            response.set_content(export_bundle(home).dump(2) + "\n", "application/json; charset=utf-8");
+        });
+    });
+
+    server.Post("/api/import", [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            {
+                std::lock_guard<std::mutex> process_lock(g_process_mutex);
+                if (!g_active_issues.empty()) throw std::runtime_error("cannot import data while tasks are running");
+            }
+            const json bundle = parse_request_json(request);
+            std::lock_guard<std::mutex> lock(g_write_mutex);
+            import_bundle(home, bundle);
+            json_response(response, json{{"imported", true}, {"schema_version", 2}});
         });
     });
 
@@ -846,6 +1148,7 @@ int serve_web(const fs::path &home, const std::vector<std::string> &args) {
                 {"role", optional_string(body, "role")},
                 {"command", command},
                 {"skills", string_array(body, "skills")},
+                {"enabled", optional_bool(body, "enabled", true)},
                 {"created_at", now_utc()},
             };
             save_entity(home, "agents", id, agent);
@@ -870,9 +1173,71 @@ int serve_web(const fs::path &home, const std::vector<std::string> &args) {
             agent["role"] = optional_string(body, "role");
             agent["command"] = command;
             agent["skills"] = string_array(body, "skills");
+            agent["enabled"] = optional_bool(body, "enabled", agent.value("enabled", true));
             agent["updated_at"] = now_utc();
             save_entity(home, "agents", id, agent);
             json_response(response, agent);
+        });
+    });
+
+    server.Post(R"(/api/agents/([A-Za-z0-9._-]+)/test)",
+                [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            const std::string id = request.matches[1].str();
+            const json body = parse_request_json(request);
+            const json agent = load_entity(home, "agents", id);
+            fs::path cwd = fs::absolute(optional_string(body, "cwd", fs::current_path().string()));
+            if (!fs::is_directory(cwd)) throw std::runtime_error("cwd is not a directory: " + cwd.string());
+            const std::string test_id = "agent-test-" + id;
+            if (!begin_issue_run(test_id)) throw std::runtime_error("agent test is already running: " + id);
+            ProcessResult result;
+            try {
+                const json issue{{"id", test_id}, {"cwd", cwd.string()}};
+                const std::string prompt = "Connection test for Multica Mini. Reply exactly: AGENT_READY";
+                const auto command = agent_command(agent, issue, prompt);
+                result = run_process(command, cwd, home, test_id, id, 60);
+            } catch (...) {
+                finish_issue_run(test_id);
+                throw;
+            }
+            finish_issue_run(test_id);
+            json_response(response, json{{"ok", result.exit_code == 0},
+                                         {"exit_code", result.exit_code},
+                                         {"output", result.output},
+                                         {"timed_out", result.timed_out}});
+        });
+    });
+
+    server.Delete(R"(/api/agents/([A-Za-z0-9._-]+))",
+                  [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            const std::string id = request.matches[1].str();
+            std::lock_guard<std::mutex> lock(g_write_mutex);
+            load_entity(home, "agents", id);
+            for (const auto &squad : load_entities(home, "squads")) {
+                if (squad.value("leader_id", "") == id) {
+                    throw std::runtime_error("agent is the leader of squad: " + squad.value("id", ""));
+                }
+                for (const auto &member : squad.value("members", json::array())) {
+                    if (member.value("agent_id", "") == id) {
+                        throw std::runtime_error("agent is a member of squad: " + squad.value("id", ""));
+                    }
+                }
+            }
+            for (const auto &issue : load_entities(home, "issues")) {
+                if (issue.value("assignee_type", "") == "agent" && issue.value("assignee_id", "") == id) {
+                    throw std::runtime_error("agent is assigned to issue: " + issue.value("id", ""));
+                }
+            }
+            fs::remove(entity_path(home, "agents", id));
+            json_response(response, json{{"deleted", id}});
+        });
+    });
+
+    server.Get(R"(/api/squads/([A-Za-z0-9._-]+))",
+               [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            json_response(response, load_entity(home, "squads", request.matches[1].str()));
         });
     });
 
@@ -912,6 +1277,56 @@ int serve_web(const fs::path &home, const std::vector<std::string> &args) {
         });
     });
 
+    server.Put(R"(/api/squads/([A-Za-z0-9._-]+))",
+               [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            const std::string id = request.matches[1].str();
+            const json body = parse_request_json(request);
+            const std::string leader_id = required_string(body, "leader_id");
+            std::string name = optional_string(body, "name");
+            if (name.empty()) name = id;
+            if (!body.contains("members") || !body["members"].is_array()) {
+                throw std::runtime_error("members must be an array");
+            }
+            std::lock_guard<std::mutex> lock(g_write_mutex);
+            json squad = load_entity(home, "squads", id);
+            load_entity(home, "agents", leader_id);
+            json members = json::array();
+            std::set<std::string> seen;
+            for (const auto &entry : body["members"]) {
+                if (!entry.is_object()) throw std::runtime_error("member entries must be objects");
+                const std::string agent_id = required_string(entry, "agent_id");
+                if (agent_id == leader_id) throw std::runtime_error("leader cannot also be a worker member");
+                if (!seen.insert(agent_id).second) throw std::runtime_error("duplicate squad member: " + agent_id);
+                const json agent = load_entity(home, "agents", agent_id);
+                members.push_back(json{{"agent_id", agent_id},
+                                       {"role", optional_string(entry, "role", agent.value("role", ""))}});
+            }
+            squad["name"] = name;
+            squad["leader_id"] = leader_id;
+            squad["members"] = members;
+            squad["updated_at"] = now_utc();
+            save_entity(home, "squads", id, squad);
+            json_response(response, squad);
+        });
+    });
+
+    server.Delete(R"(/api/squads/([A-Za-z0-9._-]+))",
+                  [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            const std::string id = request.matches[1].str();
+            std::lock_guard<std::mutex> lock(g_write_mutex);
+            load_entity(home, "squads", id);
+            for (const auto &issue : load_entities(home, "issues")) {
+                if (issue.value("assignee_type", "") == "squad" && issue.value("assignee_id", "") == id) {
+                    throw std::runtime_error("squad is assigned to issue: " + issue.value("id", ""));
+                }
+            }
+            fs::remove(entity_path(home, "squads", id));
+            json_response(response, json{{"deleted", id}});
+        });
+    });
+
     server.Post(R"(/api/squads/([A-Za-z0-9._-]+)/members)",
                 [home](const httplib::Request &request, httplib::Response &response) {
         api_guard(response, [&] {
@@ -943,7 +1358,7 @@ int serve_web(const fs::path &home, const std::vector<std::string> &args) {
             fs::path cwd = fs::absolute(optional_string(body, "cwd", fs::current_path().string()));
             if (!fs::is_directory(cwd)) throw std::runtime_error("cwd is not a directory: " + cwd.string());
             std::lock_guard<std::mutex> lock(g_write_mutex);
-            load_entity(home, type == "agent" ? "agents" : "squads", assignee_id);
+            validate_assignee_ready(home, type, assignee_id);
             const std::string issue_id = next_id(home, "issue", "issue-");
             const json issue{
                 {"id", issue_id},
@@ -953,12 +1368,60 @@ int serve_web(const fs::path &home, const std::vector<std::string> &args) {
                 {"assignee_type", type},
                 {"assignee_id", assignee_id},
                 {"cwd", cwd.string()},
+                {"review_policy", review_policy(body)},
+                {"timeout_seconds", optional_integer(body, "timeout_seconds", 900, 1, 86400)},
+                {"max_retries", optional_integer(body, "max_retries", 0, 0, 10)},
                 {"comments", json::array()},
                 {"created_at", now_utc()},
                 {"updated_at", now_utc()},
             };
             save_entity(home, "issues", issue_id, issue);
             json_response(response, issue, 201);
+        });
+    });
+
+    server.Put(R"(/api/issues/([A-Za-z0-9._-]+))",
+               [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            const std::string id = request.matches[1].str();
+            const json body = parse_request_json(request);
+            const std::string type = required_string(body, "assignee_type");
+            const std::string assignee_id = required_string(body, "assignee_id");
+            const std::string title = required_string(body, "title");
+            const std::string description = required_string(body, "description");
+            if (type != "agent" && type != "squad") throw std::runtime_error("assignee_type must be agent or squad");
+            fs::path cwd = fs::absolute(optional_string(body, "cwd", fs::current_path().string()));
+            if (!fs::is_directory(cwd)) throw std::runtime_error("cwd is not a directory: " + cwd.string());
+            std::lock_guard<std::mutex> lock(g_write_mutex);
+            json issue = load_entity(home, "issues", id);
+            validate_assignee_ready(home, type, assignee_id);
+            issue["title"] = title;
+            issue["description"] = description;
+            issue["assignee_type"] = type;
+            issue["assignee_id"] = assignee_id;
+            issue["cwd"] = cwd.string();
+            issue["review_policy"] = review_policy(body);
+            issue["timeout_seconds"] = optional_integer(body, "timeout_seconds", issue.value("timeout_seconds", 900), 1, 86400);
+            issue["max_retries"] = optional_integer(body, "max_retries", issue.value("max_retries", 0), 0, 10);
+            issue["updated_at"] = now_utc();
+            save_entity(home, "issues", id, issue);
+            json_response(response, issue);
+        });
+    });
+
+    server.Delete(R"(/api/issues/([A-Za-z0-9._-]+))",
+                  [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            const std::string id = request.matches[1].str();
+            std::lock_guard<std::mutex> lock(g_write_mutex);
+            load_entity(home, "issues", id);
+            for (const auto &entry : fs::directory_iterator(home / "runs")) {
+                if (!entry.is_regular_file() || entry.path().extension() != ".json") continue;
+                const json run = read_json(entry.path());
+                if (run.value("issue_id", "") == id) fs::remove(entry.path());
+            }
+            fs::remove(entity_path(home, "issues", id));
+            json_response(response, json{{"deleted", id}});
         });
     });
 
@@ -979,7 +1442,7 @@ int serve_web(const fs::path &home, const std::vector<std::string> &args) {
     server.Post(R"(/api/issues/([A-Za-z0-9._-]+)/status)",
                 [home](const httplib::Request &request, httplib::Response &response) {
         api_guard(response, [&] {
-            static const std::set<std::string> allowed{"todo", "in_progress", "in_review", "done"};
+            static const std::set<std::string> allowed{"todo", "queued", "in_progress", "in_review", "done", "failed", "cancelled"};
             const json body = parse_request_json(request);
             const std::string status = required_string(body, "status");
             if (!allowed.count(status)) throw std::runtime_error("invalid issue status: " + status);
@@ -993,6 +1456,28 @@ int serve_web(const fs::path &home, const std::vector<std::string> &args) {
         });
     });
 
+    server.Post(R"(/api/issues/([A-Za-z0-9._-]+)/comments)",
+                [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            const std::string issue_id = request.matches[1].str();
+            const json body = parse_request_json(request);
+            const std::string content = required_string(body, "content");
+            std::lock_guard<std::mutex> lock(g_write_mutex);
+            json issue = load_entity(home, "issues", issue_id);
+            issue["comments"].push_back(json{
+                {"id", next_id(home, "comment", "comment-")},
+                {"author_type", "human"},
+                {"author_id", "local-user"},
+                {"author_name", "你"},
+                {"content", content},
+                {"created_at", now_utc()},
+            });
+            issue["updated_at"] = now_utc();
+            save_entity(home, "issues", issue_id, issue);
+            json_response(response, issue, 201);
+        });
+    });
+
     server.Post(R"(/api/issues/([A-Za-z0-9._-]+)/run)",
                 [home](const httplib::Request &request, httplib::Response &response) {
         api_guard(response, [&] {
@@ -1003,12 +1488,53 @@ int serve_web(const fs::path &home, const std::vector<std::string> &args) {
                 max_runs = body["max_runs"].get<int>();
             }
             if (max_runs < 1 || max_runs > 256) throw std::runtime_error("max_runs must be between 1 and 256");
-            std::lock_guard<std::mutex> lock(g_write_mutex);
             const std::string issue_id = request.matches[1].str();
-            json issue = load_entity(home, "issues", issue_id);
-            const int exit_code = run_issue(home, issue, max_runs);
-            json_response(response, json{{"exit_code", exit_code},
-                                         {"issue", load_entity(home, "issues", issue_id)}});
+            if (!begin_issue_run(issue_id)) throw std::runtime_error("issue is already running: " + issue_id);
+            try {
+                std::lock_guard<std::mutex> lock(g_write_mutex);
+                json issue = load_entity(home, "issues", issue_id);
+                issue["status"] = "queued";
+                issue["updated_at"] = now_utc();
+                save_entity(home, "issues", issue_id, issue);
+            } catch (...) {
+                finish_issue_run(issue_id);
+                throw;
+            }
+            std::thread([home, issue_id, max_runs] {
+                try {
+                    std::lock_guard<std::mutex> lock(g_write_mutex);
+                    json issue = load_entity(home, "issues", issue_id);
+                    if (cancellation_requested(issue_id)) {
+                        issue["status"] = "cancelled";
+                        issue["last_error"] = "run cancelled by user";
+                        issue["updated_at"] = now_utc();
+                        save_entity(home, "issues", issue_id, issue);
+                    } else {
+                        run_issue(home, issue, max_runs);
+                    }
+                } catch (const std::exception &error) {
+                    try {
+                        json issue = load_entity(home, "issues", issue_id);
+                        issue["status"] = "failed";
+                        issue["last_error"] = error.what();
+                        issue["updated_at"] = now_utc();
+                        save_entity(home, "issues", issue_id, issue);
+                    } catch (...) {
+                    }
+                }
+                finish_issue_run(issue_id);
+            }).detach();
+            json_response(response, json{{"accepted", true}, {"issue_id", issue_id}, {"status", "queued"}}, 202);
+        });
+    });
+
+    server.Post(R"(/api/issues/([A-Za-z0-9._-]+)/cancel)",
+                [home](const httplib::Request &request, httplib::Response &response) {
+        api_guard(response, [&] {
+            const std::string issue_id = request.matches[1].str();
+            load_entity(home, "issues", issue_id);
+            if (!request_cancellation(issue_id)) throw std::runtime_error("issue is not running: " + issue_id);
+            json_response(response, json{{"cancel_requested", true}, {"issue_id", issue_id}});
         });
     });
 
@@ -1035,11 +1561,26 @@ int run_command(const fs::path &home, const std::vector<std::string> &args) {
         return 0;
     }
     ensure_home(home);
+    migrate_data(home);
     if (args[0] == "init") {
         std::cout << home << "\n";
         return 0;
     }
     if (args[0] == "serve") return serve_web(home, args);
+    if (args[0] == "data") {
+        if (args.size() != 3 || (args[1] != "export" && args[1] != "import")) {
+            throw std::runtime_error("usage: multica-core data export|import FILE");
+        }
+        const fs::path path = fs::absolute(args[2]);
+        if (args[1] == "export") {
+            write_json(path, export_bundle(home));
+            std::cout << path << "\n";
+            return 0;
+        }
+        import_bundle(home, read_json(path));
+        std::cout << path << "\n";
+        return 0;
+    }
     if (args[0] == "run") {
         if (args.size() < 2) throw std::runtime_error("run requires ISSUE_ID");
         json issue = load_entity(home, "issues", args[1]);

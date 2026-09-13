@@ -8,7 +8,7 @@ DIST="$ROOT/dist"
 STAGE="$DIST/$NAME"
 
 [ -x "$ROOT/bin/multica-core" ] || { echo "run scripts/build.sh first" >&2; exit 1; }
-for required in web/index.html docs/DESIGN.zh-CN.md start.sh install.sh README.zh-CN.md LICENSE NOTICE THIRD_PARTY_LICENSES; do
+for required in web/index.html docs/DESIGN.zh-CN.md start.sh service.sh install.sh uninstall.sh README.zh-CN.md LICENSE NOTICE THIRD_PARTY_LICENSES; do
     [ -e "$ROOT/$required" ] || { echo "missing $required" >&2; exit 1; }
 done
 
@@ -17,7 +17,7 @@ mkdir -p "$STAGE/bin"
 install -m 0755 "$ROOT/bin/multica-core" "$STAGE/bin/multica-core"
 cp -R "$ROOT/web" "$STAGE/web"
 cp -R "$ROOT/docs" "$STAGE/docs"
-install -m 0755 "$ROOT/start.sh" "$ROOT/install.sh" "$STAGE/"
+install -m 0755 "$ROOT/start.sh" "$ROOT/service.sh" "$ROOT/install.sh" "$ROOT/uninstall.sh" "$STAGE/"
 install -m 0644 "$ROOT/README.zh-CN.md" "$ROOT/LICENSE" "$ROOT/NOTICE" \
     "$ROOT/THIRD_PARTY_LICENSES" "$STAGE/"
 
