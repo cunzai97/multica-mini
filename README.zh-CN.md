@@ -21,7 +21,8 @@ cd multica-core-offline-0.1.0-linux-x86_64
 
 然后打开 `http://127.0.0.1:30420`。服务固定监听本机回环地址，不接受远程连接。
 页面可以登记 Agent、建立 Squad、添加 Worker、创建和执行 Issue，并查看 Agent 评论与
-Run 记录。页面、API 和协作运行时由同一个二进制提供。`start.sh` 默认将数据保存在
+Run 记录。界面保持 Multica 原作的浅色看板风格，并支持亮色、暗色和跟随系统三种主题。
+主题选择只保存在浏览器本地，不会写入 skill。页面、API 和协作运行时由同一个二进制提供。`start.sh` 默认将数据保存在
 解压目录的 `data/`；可以传入 `--data-dir DIR` 和 `--port PORT` 覆盖。
 
 也可以安装到指定目录：

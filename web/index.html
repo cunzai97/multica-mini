@@ -3,95 +3,141 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>Multica Core · 本地协作台</title>
+  <meta name="color-scheme" content="light dark">
+  <title>Multica Mini · 本地协作台</title>
+  <script>
+    (function () {
+      var saved = "system";
+      try { saved = localStorage.getItem("multica-mini-theme") || "system"; } catch (_) {}
+      var queryTheme = new URLSearchParams(location.search).get("theme");
+      if (queryTheme === "light" || queryTheme === "dark" || queryTheme === "system") saved = queryTheme;
+      var dark = saved === "dark" || (saved === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.dataset.themeMode = saved;
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+    })();
+  </script>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  <div class="signal-grid" aria-hidden="true"></div>
-  <aside class="rail">
-    <div class="brand">
-      <span class="brand-mark"><i></i><i></i><i></i></span>
-      <div><strong>MULTICA</strong><small>CORE / OFFLINE</small></div>
-    </div>
-    <nav aria-label="主要导航">
-      <button class="nav-item active" data-view="issues"><span>01</span>任务队列</button>
-      <button class="nav-item" data-view="agents"><span>02</span>智能体节点</button>
-      <button class="nav-item" data-view="squads"><span>03</span>小队</button>
-    </nav>
-    <div class="rail-foot">
-      <div class="online"><b></b>LOCAL LINK</div>
-      <div id="version">CORE —</div>
-      <div>127.0.0.1</div>
-    </div>
-  </aside>
-
-  <main>
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">LOCAL AGENT ORCHESTRATION</p>
-        <h1 id="view-title">任务队列</h1>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-glyph" aria-hidden="true">M</span>
+        <span><strong>Multica</strong><small>MINI · OFFLINE</small></span>
       </div>
-      <div class="top-actions">
-        <span id="sync-time">等待同步</span>
-        <button class="icon-button" id="refresh" title="刷新" aria-label="刷新数据">↻</button>
-        <button class="primary-button" id="create-button"><span>＋</span> 新建任务</button>
-      </div>
-    </header>
 
-    <section class="metrics" aria-label="运行概览">
-      <article><small>OPEN ISSUES</small><strong id="metric-open">00</strong><i class="cyan"></i></article>
-      <article><small>ACTIVE RUNS</small><strong id="metric-runs">00</strong><i class="amber"></i></article>
-      <article><small>AGENT NODES</small><strong id="metric-agents">00</strong><i class="green"></i></article>
-      <article class="system-card"><small>SYSTEM</small><strong><b></b> READY</strong><span>本机文件存储</span></article>
-    </section>
+      <button class="workspace-switch" type="button">
+        <span class="workspace-avatar">M</span>
+        <span><strong>Local workspace</strong><small>127.0.0.1</small></span>
+        <span class="chevron">⌄</span>
+      </button>
 
-    <section class="view active" id="view-issues">
-      <div class="section-bar">
-        <div class="filters" id="issue-filters">
-          <button class="active" data-status="all">全部</button>
-          <button data-status="todo">待处理</button>
-          <button data-status="in_progress">运行中</button>
-          <button data-status="in_review">待复核</button>
-          <button data-status="done">已完成</button>
+      <button class="sidebar-search" type="button" id="sidebar-search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+        <span>搜索任务...</span><kbd>⌘ K</kbd>
+      </button>
+      <button class="sidebar-create" type="button" id="sidebar-create">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"></path></svg>
+        <span>新建任务</span><kbd>C</kbd>
+      </button>
+
+      <nav aria-label="主要导航">
+        <p class="nav-label">WORKSPACE</p>
+        <button class="nav-item active" data-view="issues">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"></path><path d="M8 9h8M8 13h5"></path></svg>
+          <span>任务</span><b id="nav-issue-count">0</b>
+        </button>
+        <button class="nav-item" data-view="agents">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"></circle><path d="M5 20c.6-4 3-6 7-6s6.4 2 7 6"></path></svg>
+          <span>智能体</span><b id="nav-agent-count">0</b>
+        </button>
+        <button class="nav-item" data-view="squads">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="9" r="3"></circle><circle cx="17" cy="10" r="2"></circle><path d="M2.5 20c.5-4 2.3-6 5.5-6s5 2 5.5 6M14 15c3.8-.7 6 1 6.5 4"></path></svg>
+          <span>小队</span><b id="nav-squad-count">0</b>
+        </button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="local-status"><i></i><span><strong>本地服务在线</strong><small id="version">Core —</small></span></div>
+        <div class="theme-control">
+          <button id="theme-toggle" type="button" aria-haspopup="true" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+            <span>界面风格</span><small id="theme-current">跟随系统</small>
+          </button>
+          <div class="theme-menu" id="theme-menu" role="menu">
+            <button data-theme-mode="light" role="menuitem"><i class="theme-preview light"></i><span><strong>亮色</strong><small>Multica 原作风格</small></span><b>✓</b></button>
+            <button data-theme-mode="dark" role="menuitem"><i class="theme-preview dark"></i><span><strong>暗色</strong><small>低光环境</small></span><b>✓</b></button>
+            <button data-theme-mode="system" role="menuitem"><i class="theme-preview system"></i><span><strong>跟随系统</strong><small>自动切换</small></span><b>✓</b></button>
+          </div>
         </div>
-        <span class="record-count" id="issue-count">0 RECORDS</span>
       </div>
-      <div class="issue-board" id="issue-list"></div>
-      <div class="empty-state hidden" id="issue-empty">
-        <div class="empty-chip">＋</div><h2>队列为空</h2><p>建立任务并交给一个智能体或小队。</p>
-      </div>
-    </section>
+    </aside>
 
-    <section class="view" id="view-agents">
-      <div class="section-bar"><p>智能体命令以 argv 直接执行，skill 文件在运行时注入。</p><span class="record-count" id="agent-count">0 NODES</span></div>
-      <div class="card-grid" id="agent-list"></div>
-      <div class="empty-state hidden" id="agent-empty"><div class="empty-chip">A</div><h2>没有智能体</h2><p>先登记一个可执行的本地智能体 CLI。</p></div>
-    </section>
+    <section class="workspace">
+      <header class="window-bar">
+        <button class="sidebar-collapse" type="button" aria-label="折叠侧边栏">◫</button>
+        <span class="history-arrow">‹</span><span class="history-arrow muted">›</span>
+        <div class="window-tab">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"></path><path d="M8 9h8M8 13h5"></path></svg>
+          <span id="tab-title">任务</span>
+        </div>
+        <button class="tab-add" type="button" aria-label="新建标签">＋</button>
+      </header>
 
-    <section class="view" id="view-squads">
-      <div class="section-bar"><p>Leader 解析 mention 并将任务交给成员。</p><span class="record-count" id="squad-count">0 SQUADS</span></div>
-      <div class="card-grid squads" id="squad-list"></div>
-      <div class="empty-state hidden" id="squad-empty"><div class="empty-chip">S</div><h2>没有小队</h2><p>选择 leader 并加入至少一名成员。</p></div>
-    </section>
-  </main>
+      <main>
+        <header class="page-header">
+          <div class="page-title">
+            <span class="page-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"></path><path d="M8 9h8M8 13h5"></path></svg></span>
+            <div><h1 id="view-title">任务</h1><p id="view-subtitle">跟踪并协调本机智能体工作</p></div>
+          </div>
+          <div class="header-actions">
+            <span class="sync-time" id="sync-time">等待同步</span>
+            <button class="soft-button icon-only" id="refresh" title="刷新" aria-label="刷新数据">↻</button>
+            <button class="primary-button" id="create-button"><span>＋</span> 新建任务</button>
+          </div>
+        </header>
 
-  <aside class="detail-panel" id="detail-panel" aria-hidden="true">
-    <button class="detail-close" id="detail-close" aria-label="关闭详情">×</button>
-    <div id="detail-content"></div>
-  </aside>
-  <div class="scrim" id="detail-scrim"></div>
+        <section class="view active" id="view-issues">
+          <div class="toolbar">
+            <div class="segmented" id="issue-filters">
+              <button class="active" data-filter="all">全部</button>
+              <button data-filter="agent">智能体</button>
+              <button data-filter="squad">小队</button>
+            </div>
+            <div class="toolbar-right">
+              <span class="working-pill"><i></i><b id="working-count">0</b> 个智能体工作中</span>
+              <button class="soft-button">⌁ 筛选</button>
+              <button class="soft-button">☷ 显示</button>
+              <button class="soft-button active">▥ 看板</button>
+            </div>
+          </div>
+          <div class="board-scroll">
+            <div class="kanban-board" id="issue-list"></div>
+          </div>
+          <div class="empty-state hidden" id="issue-empty">
+            <div class="empty-icon">✓</div><h2>还没有任务</h2><p>新建任务并交给一个智能体或小队。</p>
+          </div>
+          <span class="record-count" id="issue-count">0 个任务</span>
+        </section>
 
-  <div class="modal-layer" id="modal-layer" aria-hidden="true">
-    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <button class="modal-close" id="modal-close" aria-label="关闭">×</button>
-      <p class="eyebrow" id="modal-kicker">CREATE RECORD</p>
-      <h2 id="modal-title">新建任务</h2>
-      <form id="modal-form"></form>
+        <section class="view" id="view-agents">
+          <div class="section-toolbar"><p>配置本地智能体命令、职责和 skill。</p><span class="record-count" id="agent-count">0 个智能体</span></div>
+          <div class="card-grid" id="agent-list"></div>
+          <div class="empty-state hidden" id="agent-empty"><div class="empty-icon">A</div><h2>没有智能体</h2><p>先登记一个可执行的本地智能体 CLI。</p></div>
+        </section>
+
+        <section class="view" id="view-squads">
+          <div class="section-toolbar"><p>Leader 根据任务内容，通过 mention 将工作交给成员。</p><span class="record-count" id="squad-count">0 个小队</span></div>
+          <div class="card-grid" id="squad-list"></div>
+          <div class="empty-state hidden" id="squad-empty"><div class="empty-icon">S</div><h2>没有小队</h2><p>选择 leader 并加入至少一名成员。</p></div>
+        </section>
+      </main>
     </section>
   </div>
 
-  <div class="toast" id="toast" role="status"></div>
+  <aside class="detail-panel" id="detail-panel" aria-hidden="true"></aside>
+  <div class="scrim"></div>
+  <div class="toast" role="status"></div>
   <script src="/app.js"></script>
 </body>
 </html>

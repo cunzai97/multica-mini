@@ -41,8 +41,12 @@ cd multica-mini
 - 成员返回结果后重新唤醒 leader；
 - 评论时间线、运行记录和任务状态；
 - 本地 JSON 持久化；
-- 纯 HTML、CSS、JavaScript 管理界面；
+- 采用 Multica 原作浅色看板布局的纯 HTML、CSS、JavaScript 管理界面；
+- 支持亮色、暗色和跟随系统三种界面主题；
 - CLI 和本地 JSON API。
+
+主题可在页面右上角切换，偏好只保存在当前浏览器的 `localStorage` 中。主题属于
+应用界面设置，不会进入任务提示，也不会写入任何 workflow 或 skill。
 
 ## 最小协作流程
 

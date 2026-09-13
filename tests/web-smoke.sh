@@ -31,7 +31,8 @@ done
 $ready || { cat "$TMP/server.log" >&2; echo "server did not start" >&2; exit 1; }
 
 curl -fsS "$BASE/" | grep '本地协作台' >/dev/null
-curl -fsS "$BASE/app.css" | grep -- '--cyan' >/dev/null
+curl -fsS "$BASE/" | grep 'theme-control' >/dev/null
+curl -fsS "$BASE/app.css" | grep -- '--sidebar-width' >/dev/null
 curl -fsS -X POST "$BASE/api/agents" -H 'Content-Type: application/json' \
     --data "{\"id\":\"leader\",\"name\":\"Leader\",\"command\":[\"$FAKE\",\"{prompt}\"],\"skills\":[]}" >/dev/null
 curl -fsS -X POST "$BASE/api/agents" -H 'Content-Type: application/json' \
