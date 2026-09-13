@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS client_usage_daily_identity_date_uidx;

@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS idx_dingtalk_group_route_installation_conversation;

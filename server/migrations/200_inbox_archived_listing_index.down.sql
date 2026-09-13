@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS idx_inbox_recipient_archived_created;

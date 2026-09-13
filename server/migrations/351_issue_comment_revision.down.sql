@@ -1,5 +1,0 @@
-ALTER TABLE comment
-    DROP COLUMN IF EXISTS revision;
-
-ALTER TABLE issue
-    DROP COLUMN IF EXISTS revision;

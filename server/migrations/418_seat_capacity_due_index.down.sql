@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS idx_seat_capacity_outbox_due;

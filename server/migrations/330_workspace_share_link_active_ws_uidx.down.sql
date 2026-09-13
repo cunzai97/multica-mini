@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS workspace_share_link_active_ws_uidx;

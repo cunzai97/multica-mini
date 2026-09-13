@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Multica Core · 本地协作台</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="signal-grid" aria-hidden="true"></div>
+  <aside class="rail">
+    <div class="brand">
+      <span class="brand-mark"><i></i><i></i><i></i></span>
+      <div><strong>MULTICA</strong><small>CORE / OFFLINE</small></div>
+    </div>
+    <nav aria-label="主要导航">
+      <button class="nav-item active" data-view="issues"><span>01</span>任务队列</button>
+      <button class="nav-item" data-view="agents"><span>02</span>智能体节点</button>
+      <button class="nav-item" data-view="squads"><span>03</span>小队</button>
+    </nav>
+    <div class="rail-foot">
+      <div class="online"><b></b>LOCAL LINK</div>
+      <div id="version">CORE —</div>
+      <div>127.0.0.1</div>
+    </div>
+  </aside>
+
+  <main>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">LOCAL AGENT ORCHESTRATION</p>
+        <h1 id="view-title">任务队列</h1>
+      </div>
+      <div class="top-actions">
+        <span id="sync-time">等待同步</span>
+        <button class="icon-button" id="refresh" title="刷新" aria-label="刷新数据">↻</button>
+        <button class="primary-button" id="create-button"><span>＋</span> 新建任务</button>
+      </div>
+    </header>
+
+    <section class="metrics" aria-label="运行概览">
+      <article><small>OPEN ISSUES</small><strong id="metric-open">00</strong><i class="cyan"></i></article>
+      <article><small>ACTIVE RUNS</small><strong id="metric-runs">00</strong><i class="amber"></i></article>
+      <article><small>AGENT NODES</small><strong id="metric-agents">00</strong><i class="green"></i></article>
+      <article class="system-card"><small>SYSTEM</small><strong><b></b> READY</strong><span>本机文件存储</span></article>
+    </section>
+
+    <section class="view active" id="view-issues">
+      <div class="section-bar">
+        <div class="filters" id="issue-filters">
+          <button class="active" data-status="all">全部</button>
+          <button data-status="todo">待处理</button>
+          <button data-status="in_progress">运行中</button>
+          <button data-status="in_review">待复核</button>
+          <button data-status="done">已完成</button>
+        </div>
+        <span class="record-count" id="issue-count">0 RECORDS</span>
+      </div>
+      <div class="issue-board" id="issue-list"></div>
+      <div class="empty-state hidden" id="issue-empty">
+        <div class="empty-chip">＋</div><h2>队列为空</h2><p>建立任务并交给一个智能体或小队。</p>
+      </div>
+    </section>
+
+    <section class="view" id="view-agents">
+      <div class="section-bar"><p>智能体命令以 argv 直接执行，skill 文件在运行时注入。</p><span class="record-count" id="agent-count">0 NODES</span></div>
+      <div class="card-grid" id="agent-list"></div>
+      <div class="empty-state hidden" id="agent-empty"><div class="empty-chip">A</div><h2>没有智能体</h2><p>先登记一个可执行的本地智能体 CLI。</p></div>
+    </section>
+
+    <section class="view" id="view-squads">
+      <div class="section-bar"><p>Leader 解析 mention 并将任务交给成员。</p><span class="record-count" id="squad-count">0 SQUADS</span></div>
+      <div class="card-grid squads" id="squad-list"></div>
+      <div class="empty-state hidden" id="squad-empty"><div class="empty-chip">S</div><h2>没有小队</h2><p>选择 leader 并加入至少一名成员。</p></div>
+    </section>
+  </main>
+
+  <aside class="detail-panel" id="detail-panel" aria-hidden="true">
+    <button class="detail-close" id="detail-close" aria-label="关闭详情">×</button>
+    <div id="detail-content"></div>
+  </aside>
+  <div class="scrim" id="detail-scrim"></div>
+
+  <div class="modal-layer" id="modal-layer" aria-hidden="true">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <button class="modal-close" id="modal-close" aria-label="关闭">×</button>
+      <p class="eyebrow" id="modal-kicker">CREATE RECORD</p>
+      <h2 id="modal-title">新建任务</h2>
+      <form id="modal-form"></form>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

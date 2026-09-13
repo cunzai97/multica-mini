@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS github_pull_request_check_run_pr_ordinal_idx;

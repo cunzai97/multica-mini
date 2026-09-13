@@ -1,1 +1,0 @@
-CREATE UNIQUE INDEX CONCURRENTLY idx_issue_source_context_object_intent_key ON issue_source_context_object_intent (storage_key);

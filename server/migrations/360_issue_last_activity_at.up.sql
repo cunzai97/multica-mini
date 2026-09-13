@@ -1,2 +1,0 @@
-ALTER TABLE issue
-    ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ;

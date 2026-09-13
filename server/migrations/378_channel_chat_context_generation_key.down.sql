@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS channel_chat_context_generation_session_revision_idx;

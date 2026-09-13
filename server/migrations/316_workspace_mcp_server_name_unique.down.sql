@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS idx_workspace_mcp_server_workspace_name;

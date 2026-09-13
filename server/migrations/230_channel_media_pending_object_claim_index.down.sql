@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS idx_channel_media_pending_object_claim;

@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS channel_media_pending_object_storage_key_uidx;

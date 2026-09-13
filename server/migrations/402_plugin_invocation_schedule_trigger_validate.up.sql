@@ -1,1 +1,0 @@
-ALTER TABLE plugin_invocation VALIDATE CONSTRAINT plugin_invocation_trigger_check;

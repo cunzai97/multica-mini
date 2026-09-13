@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS uq_webhook_delivery_replay_idempotency;

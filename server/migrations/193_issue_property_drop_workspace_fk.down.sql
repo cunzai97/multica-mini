@@ -1,2 +1,0 @@
--- Deliberately do not restore the pre-release foreign key. Workspace deletion
--- remains application-owned across both migration directions.

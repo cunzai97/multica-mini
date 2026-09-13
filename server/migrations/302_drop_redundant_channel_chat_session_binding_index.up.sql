@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS idx_channel_chat_session_binding_session;

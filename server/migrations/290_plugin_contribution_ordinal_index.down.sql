@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS idx_plugin_contribution_release_ordinal;

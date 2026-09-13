@@ -1,6 +1,9 @@
-# Ensure shell scripts always use LF line endings (needed for Docker on Windows)
+bin/multica-core binary
+dist/*.tar.gz binary
 *.sh text eol=lf
-docker/entrypoint.sh text eol=lf
-
-# Default behavior
-* text=auto
+*.cpp text eol=lf
+*.h text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.md text eol=lf

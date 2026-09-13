@@ -1,1 +1,0 @@
-DROP INDEX CONCURRENTLY IF EXISTS uq_autopilot_run_webhook_delivery;
